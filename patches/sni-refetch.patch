@@ -1,0 +1,114 @@
+diff --git a/include/modules/sni/item.hpp b/include/modules/sni/item.hpp
+index 503ab637..998d95ed 100644
+--- a/include/modules/sni/item.hpp
++++ b/include/modules/sni/item.hpp
+@@ -65,6 +65,7 @@ class Item : public sigc::trackable {
+   void setCustomIcon(const std::string& id);
+   void getUpdatedProperties();
+   void processUpdatedProperties(Glib::RefPtr<Gio::AsyncResult>& result);
++  void scheduleRefetch();
+   void onSignal(const Glib::ustring& sender_name, const Glib::ustring& signal_name,
+                 const Glib::VariantContainerBase& arguments);
+ 
+@@ -92,6 +93,9 @@ class Item : public sigc::trackable {
+   Glib::RefPtr<Gio::DBus::Proxy> proxy_;
+   Glib::RefPtr<Gio::Cancellable> cancellable_;
+   std::set<std::string_view> update_pending_;
++  // Bounded retries of the initial property fetch for an item whose proxy cache
++  // came back empty at registration (Chromium/Electron). See scheduleRefetch.
++  unsigned refetch_tries_ = 0;
+ };
+ 
+ }  // namespace waybar::modules::SNI
+diff --git a/src/modules/sni/item.cpp b/src/modules/sni/item.cpp
+index 398afac6..c061eeb1 100644
+--- a/src/modules/sni/item.cpp
++++ b/src/modules/sni/item.cpp
+@@ -107,7 +107,13 @@ void Item::proxyReady(Glib::RefPtr<Gio::AsyncResult>& result) {
+     this->proxy_->signal_signal().connect(sigc::mem_fun(*this, &Item::onSignal));
+ 
+     if (this->id.empty() || this->category.empty()) {
+-      spdlog::error("Invalid Status Notifier Item: {}, {}", bus_name, object_path);
++      // The proxy primes its cache with a GetAll addressed to the item's UNIQUE
++      // bus name. Chromium/Electron items (Slack, Signal, ...) reject property
++      // calls to their unique name and answer only their well-known name, so
++      // that cache came back empty and the upstream code would drop the item
++      // forever. Re-fetch over the well-known name instead (see
++      // getUpdatedProperties / scheduleRefetch).
++      scheduleRefetch();
+       return;
+     }
+     this->updateImage();
+@@ -245,13 +251,45 @@ void Item::setCustomIcon(const std::string& id) {
+ void Item::getUpdatedProperties() {
+   auto params = Glib::VariantContainerBase::create_tuple(
+       {Glib::Variant<Glib::ustring>::create(SNI_INTERFACE_NAME)});
+-  proxy_->call("org.freedesktop.DBus.Properties.GetAll",
+-               sigc::mem_fun(*this, &Item::processUpdatedProperties), params);
++  // Address the item's WELL-KNOWN bus_name explicitly rather than going through
++  // proxy_->call(), which sends to the resolved UNIQUE name. Chromium/Electron
++  // items answer property calls only on their well-known name (they error a call
++  // to their unique name), so the proxy's own GetAll silently fails for them.
++  // Well-known addressing works for every conformant item too, so this is safe
++  // for all of them.
++  proxy_->get_connection()->call(object_path, "org.freedesktop.DBus.Properties", "GetAll",
++                                 params, sigc::mem_fun(*this, &Item::processUpdatedProperties),
++                                 bus_name);
+ };
+ 
++// Re-fetch all properties (over the well-known bus_name; see getUpdatedProperties)
++// until id/category arrive, bounded. Needed when an item's proxy cache came back
++// empty at registration. Well-known addressing succeeds immediately for a healthy
++// item, so this normally converges on the first attempt; the retry only covers an
++// item whose object is genuinely not ready yet. After the window is exhausted the
++// item is declared invalid.
++void Item::scheduleRefetch() {
++  static const unsigned kMaxRefetchTries = 20;   // ~10s at 500ms
++  static const unsigned kRefetchDelayMs = 500;
++  if (!id.empty() && !category.empty()) return;  // already resolved
++  if (refetch_tries_ >= kMaxRefetchTries) {
++    spdlog::error("Invalid Status Notifier Item: {}, {}", bus_name, object_path);
++    return;
++  }
++  ++refetch_tries_;
++  for (std::string_view prop :
++       {"Category", "Id", "Title", "Status", "IconName", "IconPixmap",
++        "IconThemePath", "OverlayIconName", "AttentionIconName", "ToolTip",
++        "Menu", "ItemIsMenu"}) {
++    update_pending_.insert(prop);
++  }
++  Glib::signal_timeout().connect_once(sigc::mem_fun(*this, &Item::getUpdatedProperties),
++                                      kRefetchDelayMs);
++}
++
+ void Item::processUpdatedProperties(Glib::RefPtr<Gio::AsyncResult>& _result) {
+   try {
+-    auto result = proxy_->call_finish(_result);
++    auto result = proxy_->get_connection()->call_finish(_result);
+     // extract "a{sv}" from VariantContainerBase
+     Glib::Variant<std::map<Glib::ustring, Glib::VariantBase>> properties_variant;
+     result.get_child(properties_variant);
+@@ -265,11 +303,22 @@ void Item::processUpdatedProperties(Glib::RefPtr<Gio::AsyncResult>& _result) {
+ 
+     this->updateImage();
+   } catch (const Glib::Error& err) {
+-    spdlog::warn("Failed to update properties: {}", err.what());
++    // A still-unresolved item is mid-refetch; stay quiet and let scheduleRefetch
++    // retry. Warn only for an established item whose live update failed.
++    if (id.empty() || category.empty()) {
++      spdlog::debug("Deferred property fetch for {}: {}", bus_name, err.what());
++    } else {
++      spdlog::warn("Failed to update properties: {}", err.what());
++    }
+   } catch (const std::exception& err) {
+     spdlog::warn("Failed to update properties: {}", err.what());
+   }
+   update_pending_.clear();
++  // If the item still has no id/category, its object was not ready; keep
++  // retrying (bounded) until it answers.
++  if (id.empty() || category.empty()) {
++    scheduleRefetch();
++  }
+ }
+ 
+ /**

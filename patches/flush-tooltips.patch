@@ -1,0 +1,96 @@
+diff --git a/src/AModule.cpp b/src/AModule.cpp
+index c6fdff3e..129e8597 100644
+--- a/src/AModule.cpp
++++ b/src/AModule.cpp
+@@ -8,6 +8,8 @@
+ #include "gdk/gdk.h"
+ #include "gdkmm/cursor.h"
+ 
++#include "flush_tooltip.hpp"
++
+ namespace waybar {
+ 
+ AModule::AModule(const Json::Value& config, const std::string& name, const std::string& id,
+@@ -36,6 +38,53 @@ AModule::AModule(const Json::Value& config, const std::string& name, const std::
+   event_box_.signal_enter_notify_event().connect(sigc::mem_fun(*this, &AModule::handleMouseEnter));
+   event_box_.signal_leave_notify_event().connect(sigc::mem_fun(*this, &AModule::handleMouseLeave));
+ 
++  // Flush tooltip (tackup overlay): route this module's tooltip through the
++  // shared layer-shell popup, anchored flush to the bar and under the module,
++  // instead of GTK's pointer-floating tooltip. show() suppresses the native
++  // tooltip per widget. hw/gauge sets no GTK tooltip (it drives its own live
++  // popup), so findTooltip() is empty and this no-ops for the gauges.
++  if (isTooltip) {
++    event_box_.add_events(Gdk::POINTER_MOTION_MASK);
++    // Opt-in "tooltip-center": true centres the callout under the icon (a
++    // vertical tail) instead of the default off-to-a-side offset -- for a
++    // centred element like the clock.
++    const bool center =
++        config_["tooltip-center"].isBool() && config_["tooltip-center"].asBool();
++    // Show delay: 0 (instant) for glance-at readouts that opt in with
++    // "tooltip-instant": true (clock, gauges); otherwise a short dwell so a
++    // callout does not pop on every quick pass across the bar. "tooltip-delay"
++    // (ms) overrides the default.
++    const bool instant =
++        config_["tooltip-instant"].isBool() && config_["tooltip-instant"].asBool();
++    const int delay = instant                          ? 0
++                      : config_["tooltip-delay"].isInt() ? config_["tooltip-delay"].asInt()
++                                                         : 2000;
++    // Show the tooltip of the widget actually UNDER the pointer (so a multi-icon
++    // module like the tray shows the right icon's text, not the first child's),
++    // and update it on motion as the pointer moves between children.
++    auto tt_at = [this, center, delay](double xr, double yr) {
++      auto* w = FlushTooltip::pickTooltipped(event_box_, static_cast<int>(xr),
++                                             static_cast<int>(yr));
++      if (w != nullptr)
++        FlushTooltip::instance().requestShow(*w, FlushTooltip::ownTooltip(*w),
++                                             delay, center);
++      else
++        FlushTooltip::instance().hide();
++    };
++    event_box_.signal_enter_notify_event().connect(
++        [tt_at](GdkEventCrossing* e) { tt_at(e->x_root, e->y_root); return false; });
++    event_box_.signal_motion_notify_event().connect(
++        [tt_at](GdkEventMotion* e) { tt_at(e->x_root, e->y_root); return false; });
++    event_box_.signal_leave_notify_event().connect([this](GdkEventCrossing* e) {
++      // Ignore crossings INTO a child window (e.g. a DrawingArea with its own
++      // window, like hw/gauge) -- the pointer is still inside the module, so
++      // the callout must stay up; otherwise it only shows in the module's gaps.
++      if (e->detail == GDK_NOTIFY_INFERIOR) return false;
++      FlushTooltip::instance().hide();
++      return false;
++    });
++  }
++
+   // configure events' user commands
+   // hasUserEvents is true if any element from eventMap_ is satisfying the condition in the lambda
+   bool hasUserEvents =
+diff --git a/src/modules/clock.cpp b/src/modules/clock.cpp
+index 5fe5407b..6537da15 100644
+--- a/src/modules/clock.cpp
++++ b/src/modules/clock.cpp
+@@ -141,10 +141,9 @@ waybar::modules::Clock::Clock(const std::string& id, const Json::Value& config)
+     }
+   }
+ 
+-  if (tooltipEnabled()) {
+-    label_.set_has_tooltip(true);
+-    label_.signal_query_tooltip().connect(sigc::mem_fun(*this, &Clock::query_tlp_cb));
+-  }
++  // tackup: the calendar is published via the standard tooltip-markup property
++  // in update() (so the shared flush callout renders it) rather than the custom
++  // query-tooltip/set_custom path, which only the native floating tooltip shows.
+ 
+   thread_ = [this] {
+     dp.emit();
+@@ -187,8 +186,8 @@ auto waybar::modules::Clock::update() -> void {
+     }
+ 
+     m_tlpText_ = fmt_lib::vformat(m_locale_, m_tlpText_, fmt_lib::make_format_args(now));
+-    m_tooltip_->set_markup(m_tlpText_);
+-    label_.trigger_tooltip_query();
++    // tackup: publish via the standard property for the shared flush callout.
++    label_.set_tooltip_markup(m_tlpText_);
+   }
+ 
+   ALabel::update();

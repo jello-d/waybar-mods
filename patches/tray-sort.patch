@@ -1,0 +1,125 @@
+diff --git a/include/modules/sni/item.hpp b/include/modules/sni/item.hpp
+index 503ab637..f77b10c8 100644
+--- a/include/modules/sni/item.hpp
++++ b/include/modules/sni/item.hpp
+@@ -11,6 +11,7 @@
+ #include <libdbusmenu-gtk/dbusmenu-gtk.h>
+ #include <sigc++/trackable.h>
+ 
++#include <functional>
+ #include <set>
+ #include <string_view>
+ 
+@@ -57,6 +58,10 @@ class Item : public sigc::trackable {
+    */
+   bool item_is_menu = true;
+ 
++  // Invoked when this item's properties (id/title/icon) change, so the
++  // tray can re-sort. Set by the Tray in onAdd; id/title arrive async.
++  std::function<void()> on_updated;
++
+  private:
+   void onConfigure(GdkEventConfigure* ev);
+   void proxyReady(Glib::RefPtr<Gio::AsyncResult>& result);
+diff --git a/include/modules/sni/tray.hpp b/include/modules/sni/tray.hpp
+index 5f12d7f2..d1140bdb 100644
+--- a/include/modules/sni/tray.hpp
++++ b/include/modules/sni/tray.hpp
+@@ -2,6 +2,8 @@
+ 
+ #include <fmt/format.h>
+ 
++#include <vector>
++
+ #include "AModule.hpp"
+ #include "bar.hpp"
+ #include "modules/sni/host.hpp"
+@@ -19,10 +21,12 @@ class Tray : public AModule {
+  private:
+   void onAdd(std::unique_ptr<Item>& item);
+   void onRemove(std::unique_ptr<Item>& item);
++  void sortItems();
+ 
+   static inline std::size_t nb_hosts_ = 0;
+   bool show_passive_ = false;
+   Gtk::Box box_;
++  std::vector<Item*> items_;
+   SNI::Watcher::singleton watcher_;
+   SNI::Host host_;
+ };
+diff --git a/src/modules/sni/item.cpp b/src/modules/sni/item.cpp
+index 398afac6..ca88596d 100644
+--- a/src/modules/sni/item.cpp
++++ b/src/modules/sni/item.cpp
+@@ -371,6 +371,7 @@ void Item::updateImage() {
+   auto surface =
+       Gdk::Cairo::create_surface_from_pixbuf(pixbuf, image.get_scale_factor(), image.get_window());
+   image.set(surface);
++  if (on_updated) on_updated();
+ }
+ 
+ Glib::RefPtr<Gdk::Pixbuf> Item::getIconPixbuf() {
+diff --git a/src/modules/sni/tray.cpp b/src/modules/sni/tray.cpp
+index 34a3c05f..5286ed74 100644
+--- a/src/modules/sni/tray.cpp
++++ b/src/modules/sni/tray.cpp
+@@ -3,6 +3,8 @@
+ #include <spdlog/spdlog.h>
+ 
+ #include <algorithm>
++#include <string>
++#include <vector>
+ 
+ #include "modules/sni/icon_manager.hpp"
+ 
+@@ -39,14 +41,50 @@ void Tray::onAdd(std::unique_ptr<Item>& item) {
+   } else {
+     box_.pack_start(item->event_box);
+   }
++  items_.push_back(item.get());
++  // The item's id/title arrive asynchronously; re-sort whenever it updates.
++  item->on_updated = [this] { sortItems(); };
++  sortItems();
+   dp.emit();
+ }
+ 
+ void Tray::onRemove(std::unique_ptr<Item>& item) {
+   box_.remove(item->event_box);
++  items_.erase(std::remove(items_.begin(), items_.end(), item.get()), items_.end());
+   dp.emit();
+ }
+ 
++// Order the tray's items by the "order" config (a list of SNI ids/titles),
++// then alphabetically for anything unlisted -- a stable, config-driven order
++// (SNI items otherwise appear in nondeterministic registration order).
++void Tray::sortItems() {
++  const auto& order = config_["order"];
++  auto rank = [&order](const Item* it) -> int {
++    if (order.isArray()) {
++      for (int i = 0; i < static_cast<int>(order.size()); ++i) {
++        const std::string key = order[i].asString();
++        if (it->id == key || it->title == key) return i;
++      }
++      return static_cast<int>(order.size());
++    }
++    return 0;
++  };
++  std::vector<Item*> sorted = items_;
++  std::stable_sort(sorted.begin(), sorted.end(), [&rank](const Item* a, const Item* b) {
++    const int ra = rank(a), rb = rank(b);
++    if (ra != rb) return ra < rb;
++    const std::string& ka = a->id.empty() ? a->title : a->id;
++    const std::string& kb = b->id.empty() ? b->title : b->id;
++    return ka < kb;
++  });
++  const bool rev =
++      config_["reverse-direction"].isBool() && config_["reverse-direction"].asBool();
++  const int n = static_cast<int>(sorted.size());
++  for (int i = 0; i < n; ++i) {
++    box_.reorder_child(sorted[i]->event_box, rev ? n - 1 - i : i);
++  }
++}
++
+ auto Tray::update() -> void {
+   // Show tray only when items are available
+   std::vector<Gtk::Widget*> children = box_.get_children();

@@ -1,0 +1,20 @@
+diff --git a/meson.build b/meson.build
+index 0675a963..e783571b 100644
+--- a/meson.build
++++ b/meson.build
+@@ -87,6 +87,7 @@ upower_glib = dependency('upower-glib', required: get_option('upower_glib'))
+ pipewire = dependency('libpipewire-0.3', required: get_option('pipewire'))
+ playerctl = dependency('playerctl', version : ['>=2.0.0'], required: get_option('mpris'))
+ libpulse = dependency('libpulse', required: get_option('pulseaudio'))
++libpulse_simple = dependency('libpulse-simple', required: get_option('pulseaudio'))
+ libudev = dependency('libudev', required: get_option('libudev'))
+ libevdev = dependency('libevdev', required: get_option('libevdev'))
+ libmpdclient = dependency('libmpdclient', required: get_option('mpd'))
+@@ -542,6 +543,7 @@ executable(
+         pipewire,
+         playerctl,
+         libpulse,
++        libpulse_simple,
+         libjack,
+         libwireplumber,
+         libudev,

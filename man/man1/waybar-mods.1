@@ -1,0 +1,80 @@
+.TH WAYBAR-MODS 1 "2026" "waybar-mods" "User Commands"
+.SH NAME
+waybar-mods \- build Waybar from source with a set of overlay modules and
+patches
+.SH SYNOPSIS
+.B setup.sh
+[\fBinstall\fR|\fBverify\fR|\fBcheck\fR|\fBuninstall\fR|\fBtest\fR|\
+\fBversion\fR]
+.SH DESCRIPTION
+.B waybar-mods
+is a Waybar distribution: pristine upstream Waybar (pinned in
+.IR refs )
+plus a set of custom Cairo modules and behaviour patches, assembled onto a clean
+checkout and built from source into a prefix. It is NOT a fork; upstream is
+fetched at a known-good tag and the additions are applied as overlays and
+patches, so each one stays a discrete, upstreamable unit and the base can be
+refreshed by bumping one ref.
+.PP
+The added modules are a windows taskbar
+.RB ( wayfire/taskbar ),
+a Cairo line-graph system monitor
+.RB ( sysmon/graph ),
+brightness/volume/battery gauges
+.RB ( hw/gauge ),
+an analog clock
+.RB ( clock/analog ),
+a now-playing card
+.RB ( media/card ),
+a Bluetooth indicator
+.RB ( hw/bluetooth ),
+and a next-meeting card
+.RB ( cal/card ).
+The patches add shared flush tooltips, a hover-zoom magnifier, a stable
+config-driven SNI tray order, an SNI property re-fetch, and PulseAudio linkage
+for the media card spectrum.
+.SH COMMANDS
+.TP
+.B install
+Build and install waybar into the prefix (default
+.IR ~/.local ).
+Incremental: a no-op when the installed binary already matches the current
+overlays, patches, and upstream pin, so it is safe to re-run on every
+provision.
+.TP
+.B verify
+Build into a throwaway prefix and discard it, proving the overlays and patches
+still apply and compile against the pinned upstream without touching the real
+install. This is the check to run while iterating on a module or before bumping
+the upstream pin.
+.TP
+.B check
+Report whether waybar is installed, self-contained by rpath, and in sync with
+the source, as
+.RB [ OK ]/[ FAIL ]
+markers.
+.TP
+.B uninstall
+Remove the installed waybar and the build stamp.
+.TP
+.B version
+Print the package version and the upstream Waybar pin.
+.SH FILES
+.TP
+.I refs
+The upstream Waybar URL and pinned ref (the lower of the two-level pin).
+.TP
+.I overlays/
+The custom module sources plus
+.IR registration.patch .
+.TP
+.I patches/
+The behaviour patches applied onto the checkout.
+.TP
+.I ~/.cache/waybar-mods/
+The upstream checkout, build tree, and sync stamp.
+.SH NOTES
+Entirely unprivileged: a user build into a user prefix, no sudo. The installed
+binary carries a relative
+.RB ( $ORIGIN/../lib )
+rpath, so the prefix is self-contained with no ld.so.conf entry.

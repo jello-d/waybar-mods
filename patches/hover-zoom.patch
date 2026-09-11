@@ -1,0 +1,38 @@
+diff --git a/src/AModule.cpp b/src/AModule.cpp
+index 6a0e3d63..3f258bb3 100644
+--- a/src/AModule.cpp
++++ b/src/AModule.cpp
+@@ -9,6 +9,7 @@
+ #include "gdkmm/cursor.h"
+ 
+ #include "flush_tooltip.hpp"
++#include "hover_zoom.hpp"
+ 
+ namespace waybar {
+ 
+@@ -38,6 +39,14 @@ AModule::AModule(const Json::Value& config, const std::string& name, const std::
+   event_box_.signal_enter_notify_event().connect(sigc::mem_fun(*this, &AModule::handleMouseEnter));
+   event_box_.signal_leave_notify_event().connect(sigc::mem_fun(*this, &AModule::handleMouseLeave));
+ 
++  // tackup hover-zoom: opt a module (or a whole group) INTO the magnify effect
++  // with "zoomable": true (adds the class the overlay gates on; inherited by
++  // every leaf in a group), or OUT of it within a zoomable cluster with
++  // "zoomable": false (a "no-zoom" veto -- separators, the copyq readout).
++  if (config_["zoomable"].isBool())
++    event_box_.get_style_context()->add_class(
++        config_["zoomable"].asBool() ? "zoomable" : "no-zoom");
++
+   // Flush tooltip (tackup overlay): route this module's tooltip through the
+   // shared layer-shell popup, anchored flush to the bar and under the module,
+   // instead of GTK's pointer-floating tooltip. show() suppresses the native
+@@ -85,6 +94,10 @@ AModule::AModule(const Json::Value& config, const std::string& name, const std::
+     });
+   }
+ 
++  // tackup hover-zoom: magnify any leaf under a .zoomable ancestor on a
++  // floating overlay surface (no per-widget clip). No-op for other modules.
++  HoverZoom::attach(event_box_);
++
+   // configure events' user commands
+   // hasUserEvents is true if any element from eventMap_ is satisfying the condition in the lambda
+   bool hasUserEvents =

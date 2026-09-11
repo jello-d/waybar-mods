@@ -1,0 +1,7 @@
+# waybar-mods/refs - the upstream Waybar this overlay set is pinned to and
+# tested against. This is the LOWER of the two-level pin: a consumer tracks
+# waybar-mods at its tip, and waybar-mods rides a KNOWN-GOOD upstream tag here,
+# never a moving upstream branch. Bump WAYBAR_REF only after `setup.sh verify`
+# (or CI) proves the overlays + patches still apply and build against it.
+WAYBAR_URL=https://github.com/Alexays/Waybar
+WAYBAR_REF=161367d9617673a4ef9caf8299411dc5153464d1

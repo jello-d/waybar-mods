@@ -1,0 +1,110 @@
+#!/bin/sh
+# build-waybar <prefix> - assemble our Waybar (upstream at refs + our overlay
+# modules + our patches) and install it into <prefix>. This is the whole recipe,
+# with no gating and no stamp: the caller (setup.sh) decides when to run it and
+# records the result. Reused by `setup.sh install` (prefix = ~/.local) and
+# `setup.sh verify` (prefix = a throwaway dir), so the CI build and the real
+# build are the SAME path.
+#
+# rpath: every ELF gets a RELATIVE DT_RUNPATH of $ORIGIN/../lib/<arch>, so the
+# installed waybar resolves its own libs from the prefix with no ld.so.conf
+# entry, wherever the prefix lives. This is a property of a self-contained
+# build, not of any one consumer, so it is baked HERE.
+#
+# Needs: git, meson, ninja, and Waybar's build libs (gtkmm, cairo, jsoncpp,
+# spdlog, ...). The consumer declares those; this fails loud via meson if a lib
+# is missing.
+set -eu
+
+_prefix=${1:?usage: build-waybar <prefix>}
+: "${WBM_ROOT:?WBM_ROOT (the waybar-mods repo root) must be set}"
+. "$WBM_ROOT/refs"
+
+CACHE=${WBM_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/waybar-mods}
+SRC=$CACHE/upstream
+BUILD=$CACHE/_build
+JOBS=$(nproc 2>/dev/null || echo 4)
+ARCH=$(cc -dumpmachine 2>/dev/null || gcc -dumpmachine 2>/dev/null \
+       || echo x86_64-linux-gnu)
+OV=$WBM_ROOT/overlays
+PAT=$WBM_ROOT/patches
+
+# Anonymous public clone: do not let a login user's git identity (an
+# insteadOf ssh rewrite) turn this https clone into an ssh one that dies on a
+# fresh box with no known_hosts.
+export GIT_CONFIG_GLOBAL=/dev/null
+
+mkdir -p "$CACHE"
+
+# --- fetch pristine upstream at the pinned ref ------------------------------
+if [ ! -d "$SRC/.git" ]; then
+  git clone "$WAYBAR_URL" "$SRC"
+fi
+git -C "$SRC" fetch --tags --force origin
+git -C "$SRC" checkout -f "$WAYBAR_REF"
+
+# --- drop our overlay module sources into the checkout ----------------------
+# Untracked new files (upstream has none of these), so the `git checkout -- .`
+# below leaves them in place while restoring the tracked files a prior patch
+# touched (factory.cpp, meson.build) to pristine, so the patches re-apply.
+mkdir -p \
+  "$SRC/include/modules/wayfire" "$SRC/src/modules/wayfire" \
+  "$SRC/include/modules/sysmon"  "$SRC/src/modules/sysmon" \
+  "$SRC/include/modules/hw"      "$SRC/src/modules/hw" \
+  "$SRC/include/modules/analog"  "$SRC/src/modules/analog" \
+  "$SRC/include/modules/media"   "$SRC/src/modules/media" \
+  "$SRC/include/modules/cal"     "$SRC/src/modules/cal"
+
+cp "$OV/taskbar.hpp"    "$SRC/include/modules/wayfire/taskbar.hpp"
+cp "$OV/taskbar.cpp"    "$SRC/src/modules/wayfire/taskbar.cpp"
+cp "$OV/sysmon.hpp"     "$SRC/include/modules/sysmon/graph.hpp"
+cp "$OV/sysmon.cpp"     "$SRC/src/modules/sysmon/graph.cpp"
+cp "$OV/gauge.hpp"      "$SRC/include/modules/hw/gauge.hpp"
+cp "$OV/gauge.cpp"      "$SRC/src/modules/hw/gauge.cpp"
+cp "$OV/bt.hpp"         "$SRC/include/modules/hw/bluetooth.hpp"
+cp "$OV/bt.cpp"         "$SRC/src/modules/hw/bluetooth.cpp"
+cp "$OV/analog.hpp"     "$SRC/include/modules/analog/clock.hpp"
+cp "$OV/analog.cpp"     "$SRC/src/modules/analog/clock.cpp"
+cp "$OV/media_card.hpp" "$SRC/include/modules/media/card.hpp"
+cp "$OV/media_card.cpp" "$SRC/src/modules/media/card.cpp"
+cp "$OV/cal_card.hpp"   "$SRC/include/modules/cal/card.hpp"
+cp "$OV/cal_card.cpp"   "$SRC/src/modules/cal/card.cpp"
+# header-only helpers, included by AModule + the modules above
+cp "$OV/flush_tooltip.hpp" "$SRC/include/flush_tooltip.hpp"
+cp "$OV/hover_zoom.hpp"    "$SRC/include/hover_zoom.hpp"
+cp "$OV/nvml.hpp"          "$SRC/include/nvml.hpp"
+cp "$OV/spectrum.hpp"      "$SRC/include/spectrum.hpp"
+
+# --- restore tracked files to pristine, then apply our patches --------------
+# A reused checkout still carries a prior run's applied patches as local edits;
+# restore every tracked file to the pinned ref first (untracked overlay copies
+# survive) so each patch ALWAYS applies against pristine upstream. Under set -e
+# a broken patch aborts here rather than shipping a stale binary in silence.
+git -C "$SRC" checkout -- .
+# registration.patch: register the overlay module names in Waybar's Factory and
+# add their sources to meson. Lives beside the overlay sources.
+git -C "$SRC" apply "$OV/registration.patch"
+# route every module's tooltip through the shared flush popup (AModule)
+git -C "$SRC" apply "$PAT/flush-tooltips.patch"
+# hover-zoom magnifier overlay (AModule wiring + .zoomable opt-in)
+git -C "$SRC" apply "$PAT/hover-zoom.patch"
+# stable, config-driven SNI tray order (the tray "order" list)
+git -C "$SRC" apply "$PAT/tray-sort.patch"
+# re-fetch SNI properties when the proxy cache races empty, so Chromium/Electron
+# tray icons (Slack, ...) are not dropped forever
+git -C "$SRC" apply "$PAT/sni-refetch.patch"
+# link libpulse-simple for the media card's local audio spectrum
+git -C "$SRC" apply "$PAT/spectrum-pulse.patch"
+
+# --- build + install --------------------------------------------------------
+# cava is retired here (our sysmon/graph module replaced it). Its meson feature
+# defaults to `auto`, which silently builds Waybar's bundled cava subproject
+# (iniparser/fftw3/asound/ncursesw): dead weight, and a build break wherever
+# those deps are absent. Disable it. This is OUR decision, so it defaults here.
+rm -rf "$BUILD"
+LDFLAGS='-Wl,-rpath,$ORIGIN/../lib/'"$ARCH${LDFLAGS:+ $LDFLAGS}" \
+  meson setup "$BUILD" "$SRC" --prefix="$_prefix" -Dcava=disabled \
+    -Dwerror=false -Dc_args=-Wno-error -Dcpp_args=-Wno-error
+ninja -C "$BUILD" -j "$JOBS"
+meson install -C "$BUILD"
+echo "waybar-mods: built + installed waybar ($WAYBAR_REF) -> $_prefix"
