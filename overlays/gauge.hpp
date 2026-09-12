@@ -26,6 +26,11 @@ namespace waybar::modules::hw {
 // percent) and each carries an optional hook ("on-warn" / "on-crit" /
 // "on-normal") spawned when the charge crosses INTO that tier -- so a consumer
 // wires a notification off the bar's existing poll instead of running its own.
+// A hook is either a command string (fires on any crossing) or an object
+// scoping it to the power source, which may carry a DIFFERENT command per
+// source: {"battery": "dim-the-hub", "ac": "wake-the-hub"}. That is the point
+// of the scope -- a notification usually only makes sense on battery, but a
+// peripheral wants opposite actions in the two directions.
 //
 // Data is read without a poll-driven fork: volume comes from libpulse
 // (util::AudioBackend, event-driven); brightness and battery are tiny /sys
@@ -78,7 +83,8 @@ class Gauge final : public waybar::AModule {
   // given in PERCENT, held here as a 0..1 fraction to match level_). Defaults
   // are the tiers this gauge drew before they were configurable. Crossing INTO
   // a tier spawns that tier's hook -- config "on-warn" / "on-crit" /
-  // "on-normal", each optional: an undefined one fires nothing.
+  // "on-normal", each optional: an undefined one fires nothing. A hook may be
+  // scoped (and given a different command) per power source; see batt_hook.
   double batt_warn_ = 0.40;     // green -> amber boundary
   double batt_crit_ = 0.20;     // amber -> red boundary
   BattState batt_state_ = BattState::Normal;
@@ -141,6 +147,7 @@ class Gauge final : public waybar::AModule {
   void ddc_flush();               // push ddc_pending_val_ to every monitor
 
   void read_batt_config();        // parse + validate the tier boundaries
+  void check_batt_hooks() const;  // report a malformed hook, once, up front
   void read_brightness();
   void read_battery();
   void read_volume();
@@ -148,6 +155,7 @@ class Gauge final : public waybar::AModule {
   void update_tooltip();
 
   BattState batt_state_for(double lvl) const;
+  std::string batt_hook(const char* key) const;   // "" => nothing to run
   void check_batt_state();        // fire a hook on a tier crossing
   void batt_color(double& r, double& g, double& b) const;
   void draw_sun(const Cairo::RefPtr<Cairo::Context>& cr, double cx, double cy,

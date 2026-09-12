@@ -142,6 +142,7 @@ Gauge::Gauge(const std::string& id, const waybar::Bar& bar,
   if (config_["temp-hot"].isNumeric())
     temp_hot_ = config_["temp-hot"].asDouble();
   read_batt_config();
+  check_batt_hooks();
   gpu_ = config_["source"].isString() && config_["source"].asString() == "gpu";
   double iv = config_["interval"].isNumeric()
                   ? config_["interval"].asDouble()
@@ -334,6 +335,55 @@ void Gauge::read_batt_config() {
   batt_warn_ = warn / 100.0;
 }
 
+// The hook keys, in tier order. One list so the validator and the firing path
+// cannot disagree about which keys exist.
+static const char* const kBattHooks[] = {"on-normal", "on-warn", "on-crit"};
+
+// Validate the hooks ONCE, at construction, so a malformed one is reported
+// before it is needed rather than silently doing nothing at 5% charge. The
+// silent failure this config can most easily hide is a mistyped scope
+// ("batt" for "battery"), which would just never fire, so an unknown slot is an
+// ERROR and not a shrug. Reports everything wrong in one pass instead of
+// stopping at the first, since a config gets fixed in one edit.
+void Gauge::check_batt_hooks() const {
+  for (const char* k : kBattHooks) {
+    const Json::Value& h = config_[k];
+    if (h.isNull() || h.isString()) continue;      // absent, or a plain command
+    if (!h.isObject()) {
+      spdlog::error("hw/gauge: {} must be a command string or a "
+                    "{{\"battery\": ..., \"ac\": ...}} object", k);
+      continue;
+    }
+    for (const auto& slot : h.getMemberNames()) {
+      if (slot != "ac" && slot != "battery")
+        spdlog::error("hw/gauge: {} has unknown scope \"{}\" (want \"battery\" "
+                      "or \"ac\")", k, slot);
+      else if (!h[slot].isString())
+        spdlog::error("hw/gauge: {}.{} must be a command string", k, slot);
+    }
+  }
+}
+
+// The command a tier's hook should run RIGHT NOW, or "" for nothing. A plain
+// string fires on any crossing; an object scopes the hook to the power source
+// and may carry a different command for each, which is the case a simple
+// on/off filter could not express: a notification wants to fire only on
+// battery, while a peripheral wants one action leaving AC and another arriving.
+// Scope is judged by the CURRENT source, read fresh from /sys in the same pass
+// that found the crossing. "ac" is plugged_, i.e. the BATTERY's status is
+// Charging / Full / Not charging. Known edge: a machine drawing more than its
+// charger supplies reports Discharging with the adapter attached, and scopes as
+// "battery". Reading the Mains supply's own `online` node would settle that,
+// but plugged_ also drives the charging bolt and the halo, so changing how it
+// is derived is a visual change and does not belong in the hook scope.
+std::string Gauge::batt_hook(const char* key) const {
+  const Json::Value& h = config_[key];
+  if (h.isString()) return h.asString();
+  if (!h.isObject()) return "";
+  const Json::Value& cmd = h[plugged_ ? "ac" : "battery"];
+  return cmd.isString() ? cmd.asString() : "";
+}
+
 // Which tier a charge falls in. The low end of each is INCLUSIVE (at or below
 // batt-crit is Crit, at or below batt-warn is Warn), matching how this gauge
 // has always drawn its boundaries. The ONE place the tiers are decided: the
@@ -348,12 +398,14 @@ Gauge::BattState Gauge::batt_state_for(double lvl) const {
 // that finds the same tier spawns nothing. Three deliberate choices:
 //  - the FIRST reading arms the tier SILENTLY. A bar restart (`wb restart`) is
 //    routine here, and re-announcing "battery critical" on each one is noise.
-//  - a hook sees BOTH directions: charging up past batt-crit enters Warn and
-//    fires on-warn. Suppressing the upward edge would make on-normal ("back to
-//    healthy") impossible, which is the more useful of the two; a hook that
-//    cares about direction reads /sys status itself.
-//  - the tier advances even with NO hook defined, so an undefined state cannot
-//    desync the machine and misattribute the next crossing.
+//  - a hook sees BOTH directions by default: charging up past batt-crit enters
+//    Warn and fires on-warn. Suppressing the upward edge outright would make
+//    on-normal ("back to healthy") impossible, which is the more useful of the
+//    two -- so the edge is kept and the POWER-SOURCE SCOPE is how a hook opts
+//    out of the direction it does not care about (see batt_hook).
+//  - the tier advances even with NO hook defined (or with one the power-source
+//    scope filters out), so neither can desync the machine and misattribute the
+//    next crossing.
 void Gauge::check_batt_state() {
   const BattState st = batt_state_for(level_);
   if (!batt_primed_) {
@@ -366,9 +418,10 @@ void Gauge::check_batt_state() {
   const char* key = st == BattState::Crit   ? "on-crit"
                     : st == BattState::Warn ? "on-warn"
                                             : "on-normal";
-  if (!config_[key].isString()) return;      // undefined: nothing fires
+  const std::string cmd = batt_hook(key);
+  if (cmd.empty()) return;        // undefined, or out of scope: nothing fires
   try {
-    Glib::spawn_command_line_async(config_[key].asString());
+    Glib::spawn_command_line_async(cmd);
   } catch (const Glib::Error& err) {
     spdlog::warn("hw/gauge: {} failed: {}", key, err.what().raw());
   }
