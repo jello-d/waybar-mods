@@ -141,6 +141,7 @@ Gauge::Gauge(const std::string& id, const waybar::Bar& bar,
     temp_warm_ = config_["temp-warm"].asDouble();
   if (config_["temp-hot"].isNumeric())
     temp_hot_ = config_["temp-hot"].asDouble();
+  read_batt_config();
   gpu_ = config_["source"].isString() && config_["source"].asString() == "gpu";
   double iv = config_["interval"].isNumeric()
                   ? config_["interval"].asDouble()
@@ -308,6 +309,71 @@ void Gauge::read_temp() {
   level_ = f < 0.0 ? 0.0 : (f > 1.0 ? 1.0 : f);   // dial fraction
 }
 
+// The charge tiers, given in PERCENT ("batt-warn" 40, "batt-crit" 20 by
+// default) and held as a 0..1 fraction to compare against level_ directly. An
+// INCOHERENT pair is refused LOUDLY and wholesale rather than clamped: clamping
+// would silently redefine what the user asked for, and a gauge drawing tiers
+// nobody chose is worse than one drawing the documented defaults.
+void Gauge::read_batt_config() {
+  const bool has_warn = config_["batt-warn"].isNumeric();
+  const bool has_crit = config_["batt-crit"].isNumeric();
+  // Configure NOTHING when neither key is set: the members keep their in-class
+  // fractions untouched, so an unconfigured gauge draws the exact tiers it drew
+  // before they were configurable -- no percent -> fraction round trip to be
+  // off by an ulp at a boundary.
+  if (!has_warn && !has_crit) return;
+  double warn = has_warn ? config_["batt-warn"].asDouble() : batt_warn_ * 100.0;
+  double crit = has_crit ? config_["batt-crit"].asDouble() : batt_crit_ * 100.0;
+  if (crit < 0.0 || crit > warn || warn > 100.0) {
+    spdlog::error("hw/gauge: batt-crit {} / batt-warn {} incoherent (need "
+                  "0 <= crit <= warn <= 100); keeping {} / {}",
+                  crit, warn, batt_crit_ * 100.0, batt_warn_ * 100.0);
+    return;
+  }
+  batt_crit_ = crit / 100.0;
+  batt_warn_ = warn / 100.0;
+}
+
+// Which tier a charge falls in. The low end of each is INCLUSIVE (at or below
+// batt-crit is Crit, at or below batt-warn is Warn), matching how this gauge
+// has always drawn its boundaries. The ONE place the tiers are decided: the
+// colour, the halo, the empty-cell void and the hooks all route through here.
+Gauge::BattState Gauge::batt_state_for(double lvl) const {
+  if (lvl <= batt_crit_) return BattState::Crit;
+  if (lvl <= batt_warn_) return BattState::Warn;
+  return BattState::Normal;
+}
+
+// Fire a tier's hook when the charge crosses INTO it. Edge-triggered, so a poll
+// that finds the same tier spawns nothing. Three deliberate choices:
+//  - the FIRST reading arms the tier SILENTLY. A bar restart (`wb restart`) is
+//    routine here, and re-announcing "battery critical" on each one is noise.
+//  - a hook sees BOTH directions: charging up past batt-crit enters Warn and
+//    fires on-warn. Suppressing the upward edge would make on-normal ("back to
+//    healthy") impossible, which is the more useful of the two; a hook that
+//    cares about direction reads /sys status itself.
+//  - the tier advances even with NO hook defined, so an undefined state cannot
+//    desync the machine and misattribute the next crossing.
+void Gauge::check_batt_state() {
+  const BattState st = batt_state_for(level_);
+  if (!batt_primed_) {
+    batt_primed_ = true;
+    batt_state_ = st;
+    return;
+  }
+  if (st == batt_state_) return;
+  batt_state_ = st;
+  const char* key = st == BattState::Crit   ? "on-crit"
+                    : st == BattState::Warn ? "on-warn"
+                                            : "on-normal";
+  if (!config_[key].isString()) return;      // undefined: nothing fires
+  try {
+    Glib::spawn_command_line_async(config_[key].asString());
+  } catch (const Glib::Error& err) {
+    spdlog::warn("hw/gauge: {} failed: {}", key, err.what().raw());
+  }
+}
+
 void Gauge::read_battery() {
   if (bat_dir_.empty()) return;
   status_ = read_str(bat_dir_ + "/status");
@@ -341,6 +407,8 @@ void Gauge::read_battery() {
   }
   // no meaningful estimate when full/topped off
   if (status_ == "Full" || level_ >= 0.995 || time_min_ == 0) time_min_ = -1;
+
+  check_batt_state();   // level_ is settled: fire a hook if the tier changed
 }
 
 void Gauge::update_tooltip() {
@@ -585,9 +653,11 @@ bool Gauge::on_release(GdkEventButton* e) {
 // ---- drawing -------------------------------------------------------------
 
 void Gauge::batt_color(double& r, double& g, double& b) const {
-  if (level_ <= 0.20) { r = 0.95; g = 0.30; b = 0.30; }        // red
-  else if (level_ <= 0.40) { r = 0.97; g = 0.75; b = 0.20; }   // amber
-  else { r = 0.40; g = 0.85; b = 0.45; }                       // green
+  switch (batt_state_for(level_)) {
+    case BattState::Crit: r = 0.95; g = 0.30; b = 0.30; break;   // red
+    case BattState::Warn: r = 0.97; g = 0.75; b = 0.20; break;   // amber
+    default:              r = 0.40; g = 0.85; b = 0.45;          // green
+  }
 }
 
 void Gauge::draw_sun(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
@@ -950,15 +1020,19 @@ void Gauge::draw_battery(const Cairo::RefPtr<Cairo::Context>& cr, double x,
   // OUTSIDE halo (like the bulb's): a soft glow whose HOT CORE hides behind the
   // shell, leaving only a smooth outward falloff -- no crisp rim. Contrasted
   // to the fill so it reads as light: charging is warm yellow over a green
-  // (>40) cell, lime over a warm amber/red one; else red when low (<=20), amber
-  // <=40. A healthy unplugged cell stays calm.
+  // (above batt-warn) cell, lime over a warm amber/red one; else red in the
+  // crit tier, amber in the warn tier. A healthy unplugged cell stays calm.
   double gr = r, gg = g, gb = b, ga = 0.0, gspread = 6.0;
+  const BattState bst = batt_state_for(level_);
   if (plugged_) {
-    if (level_ > 0.40) { gr = 1.00; gg = 0.80; gb = 0.13; }   // green: yellow
-    else               { gr = 0.80; gg = 0.97; gb = 0.20; }   // warm: lime
+    if (bst == BattState::Normal) {       // over a green cell: warm yellow
+      gr = 1.00; gg = 0.80; gb = 0.13;
+    } else {                              // over an amber/red one: lime
+      gr = 0.80; gg = 0.97; gb = 0.20;
+    }
     ga = 0.95; gspread = 11.0;
-  } else if (level_ <= 0.20) { ga = 0.65; gspread = 9.5; }
-  else if (level_ <= 0.40) { ga = 0.34; gspread = 9.5; }
+  } else if (bst == BattState::Crit) { ga = 0.65; gspread = 9.5; }
+  else if (bst == BattState::Warn)   { ga = 0.34; gspread = 9.5; }
   if (ga > 0.0) {
     const int N = 18;
     const double inset = 2.5;          // hottest rings sit inside the shell
@@ -1024,7 +1098,7 @@ void Gauge::draw_battery(const Cairo::RefPtr<Cairo::Context>& cr, double x,
   const double fw = iw * lvl;
   // low state: paint the empty remainder deep red, so a thin sliver still reads
   // as critically low (two-tone: bright red charge left, deep red void right)
-  if (level_ <= 0.20 && fw < iw) {
+  if (bst == BattState::Crit && fw < iw) {
     cr->save();
     hcyl(ix, iy, iw, ih, ecx);
     cr->clip();
@@ -1457,11 +1531,13 @@ bool Gauge::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     const double icon_h = baseline - cap - gap - top_edge;
     draw_battery(cr, 2.0, top_edge, w - 4.0, icon_h);
 
-    // Colour aligned with the battery body (batt_color: red <=20, amber <=40),
-    // diverging only mid-range: the text goes white 41..80, then green 81+,
-    // while the body stays green the whole way above 40.
+    // Colour aligned with the battery body (batt_color: red in the crit tier,
+    // amber in the warn tier), diverging only mid-range: the text goes white
+    // from just above batt-warn up to 80, then green 81+, while the body stays
+    // green the whole way above batt-warn. The 80 is its own choice, not a
+    // tier boundary, so it is left literal.
     double tr, tg, tb;
-    if (pctval > 40 && pctval <= 80) { tr = tg = tb = 0.96; }   // white
+    if (level_ > batt_warn_ && pctval <= 80) { tr = tg = tb = 0.96; }  // white
     else batt_color(tr, tg, tb);                        // red/amber/green
 
     draw_text(cr, pctstr, w / 2.0, baseline, fit, tr, tg, tb);

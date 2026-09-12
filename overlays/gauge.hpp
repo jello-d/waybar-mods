@@ -22,6 +22,11 @@ namespace waybar::modules::hw {
 // state channels stay independent -- e.g. battery charge (fill + colour) and
 // charging (a bolt overlay) never share one glyph.
 //
+// The battery's charge TIERS are user-set ("batt-warn" / "batt-crit", in
+// percent) and each carries an optional hook ("on-warn" / "on-crit" /
+// "on-normal") spawned when the charge crosses INTO that tier -- so a consumer
+// wires a notification off the bar's existing poll instead of running its own.
+//
 // Data is read without a poll-driven fork: volume comes from libpulse
 // (util::AudioBackend, event-driven); brightness and battery are tiny /sys
 // reads on a slow timer (plus an immediate re-read after a scroll). The numeric
@@ -37,6 +42,11 @@ class Gauge final : public waybar::AModule {
 
  private:
   enum class Kind { Brightness, Volume, Battery, Temp };
+
+  // Battery charge tiers: Normal above batt-warn, Warn down to batt-crit, Crit
+  // at or below it. One enum drives BOTH the colour the cell is drawn in and
+  // the state-crossing hooks, so the two can never disagree.
+  enum class BattState { Normal, Warn, Crit };
 
   const waybar::Bar& bar_;
   Kind kind_ = Kind::Battery;
@@ -63,6 +73,16 @@ class Gauge final : public waybar::AModule {
   double power_w_ = 0.0;
   int time_min_ = -1;           // battery time-to (minutes; -1 unknown)
   int cycles_ = -1;
+
+  // battery: the two user-set tier boundaries (config "batt-warn"/"batt-crit",
+  // given in PERCENT, held here as a 0..1 fraction to match level_). Defaults
+  // are the tiers this gauge drew before they were configurable. Crossing INTO
+  // a tier spawns that tier's hook -- config "on-warn" / "on-crit" /
+  // "on-normal", each optional: an undefined one fires nothing.
+  double batt_warn_ = 0.40;     // green -> amber boundary
+  double batt_crit_ = 0.20;     // amber -> red boundary
+  BattState batt_state_ = BattState::Normal;
+  bool batt_primed_ = false;    // first reading arms the tier without firing
 
   std::shared_ptr<util::AudioBackend> audio_;   // volume only
   std::string bl_dir_;          // backlight sysfs dir (brightness)
@@ -120,12 +140,15 @@ class Gauge final : public waybar::AModule {
   void ddc_set(double lvl);       // throttled brightness write to all monitors
   void ddc_flush();               // push ddc_pending_val_ to every monitor
 
+  void read_batt_config();        // parse + validate the tier boundaries
   void read_brightness();
   void read_battery();
   void read_volume();
   void read_temp();
   void update_tooltip();
 
+  BattState batt_state_for(double lvl) const;
+  void check_batt_state();        // fire a hook on a tier crossing
   void batt_color(double& r, double& g, double& b) const;
   void draw_sun(const Cairo::RefPtr<Cairo::Context>& cr, double cx, double cy,
                 double rad, double r, double g, double b);
