@@ -35,6 +35,10 @@ PAT=$WBM_ROOT/patches
 export GIT_CONFIG_GLOBAL=/dev/null
 
 mkdir -p "$CACHE"
+# Run from a known-good dir: meson realpaths the process CWD during setup, so a
+# caller whose CWD was removed (a cleaned temp dir) makes `meson setup` die in
+# os.path.realpath. Every path below is absolute, so the CWD is otherwise moot.
+cd "$CACHE"
 
 # --- fetch pristine upstream at the pinned ref ------------------------------
 if [ ! -d "$SRC/.git" ]; then
