@@ -341,23 +341,23 @@ static const char* const kBattHooks[] = {"on-normal", "on-warn", "on-crit"};
 
 // Validate the hooks ONCE, at construction, so a malformed one is reported
 // before it is needed rather than silently doing nothing at 5% charge. The
-// silent failure this config can most easily hide is a mistyped scope
-// ("batt" for "battery"), which would just never fire, so an unknown slot is an
-// ERROR and not a shrug. Reports everything wrong in one pass instead of
-// stopping at the first, since a config gets fixed in one edit.
+// silent failure this config can most easily hide is a mistyped scope ("pluged"
+// for "plugged"), which would just never fire, so an unknown slot is an ERROR
+// and not a shrug. Reports everything wrong in one pass instead of stopping at
+// the first, since a config gets fixed in one edit.
 void Gauge::check_batt_hooks() const {
   for (const char* k : kBattHooks) {
     const Json::Value& h = config_[k];
     if (h.isNull() || h.isString()) continue;      // absent, or a plain command
     if (!h.isObject()) {
       spdlog::error("hw/gauge: {} must be a command string or a "
-                    "{{\"battery\": ..., \"ac\": ...}} object", k);
+                    "{{\"plugged\": ..., \"unplugged\": ...}} object", k);
       continue;
     }
     for (const auto& slot : h.getMemberNames()) {
-      if (slot != "ac" && slot != "battery")
-        spdlog::error("hw/gauge: {} has unknown scope \"{}\" (want \"battery\" "
-                      "or \"ac\")", k, slot);
+      if (slot != "plugged" && slot != "unplugged")
+        spdlog::error("hw/gauge: {} has unknown scope \"{}\" (want \"plugged\" "
+                      "or \"unplugged\")", k, slot);
       else if (!h[slot].isString())
         spdlog::error("hw/gauge: {}.{} must be a command string", k, slot);
     }
@@ -365,22 +365,27 @@ void Gauge::check_batt_hooks() const {
 }
 
 // The command a tier's hook should run RIGHT NOW, or "" for nothing. A plain
-// string fires on any crossing; an object scopes the hook to the power source
-// and may carry a different command for each, which is the case a simple
-// on/off filter could not express: a notification wants to fire only on
-// battery, while a peripheral wants one action leaving AC and another arriving.
-// Scope is judged by the CURRENT source, read fresh from /sys in the same pass
-// that found the crossing. "ac" is plugged_, i.e. the BATTERY's status is
-// Charging / Full / Not charging. Known edge: a machine drawing more than its
-// charger supplies reports Discharging with the adapter attached, and scopes as
-// "battery". Reading the Mains supply's own `online` node would settle that,
-// but plugged_ also drives the charging bolt and the halo, so changing how it
-// is derived is a visual change and does not belong in the hook scope.
+// string fires on any crossing; an object scopes the hook to the power state
+// and may carry a different command for each, which is the case a simple on/off
+// filter could not express: a notification wants to fire only while draining,
+// while a peripheral wants one action on the way down and another on the way
+// back. Judged by the CURRENT state, read fresh from /sys in the same pass that
+// found the crossing.
+//
+// The slots are "plugged" / "unplugged" -- named after plugged_, the thing they
+// actually test, and NOT "ac" / "battery". That is deliberate: plugged_ is
+// the BATTERY's own status (Charging / Full / Not charging), not the adapter's
+// `online` node, so a machine drawing more than its charger supplies reports
+// Discharging with the adapter attached and lands in "unplugged". An "ac" slot
+// would be lying there; "unplugged" is merely surprising, and for a hook that
+// cares whether the battery is DRAINING it is also the more useful answer. The
+// same plugged_ drives the charging bolt and the halo, so the whole module
+// agrees on one definition rather than holding two.
 std::string Gauge::batt_hook(const char* key) const {
   const Json::Value& h = config_[key];
   if (h.isString()) return h.asString();
   if (!h.isObject()) return "";
-  const Json::Value& cmd = h[plugged_ ? "ac" : "battery"];
+  const Json::Value& cmd = h[plugged_ ? "plugged" : "unplugged"];
   return cmd.isString() ? cmd.asString() : "";
 }
 

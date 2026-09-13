@@ -27,10 +27,11 @@ namespace waybar::modules::hw {
 // "on-normal") spawned when the charge crosses INTO that tier -- so a consumer
 // wires a notification off the bar's existing poll instead of running its own.
 // A hook is either a command string (fires on any crossing) or an object
-// scoping it to the power source, which may carry a DIFFERENT command per
-// source: {"battery": "dim-the-hub", "ac": "wake-the-hub"}. That is the point
-// of the scope -- a notification usually only makes sense on battery, but a
-// peripheral wants opposite actions in the two directions.
+// scoping it to the power state, which may carry a DIFFERENT command for each:
+// {"unplugged": "dim-the-hub", "plugged": "wake-the-hub"}. That is the point of
+// the scope -- a notification usually only makes sense while draining, but a
+// peripheral wants opposite actions in the two directions. The slots are named
+// for plugged_, the state they test; see batt_hook for why not "ac"/"battery".
 //
 // Data is read without a poll-driven fork: volume comes from libpulse
 // (util::AudioBackend, event-driven); brightness and battery are tiny /sys
@@ -84,7 +85,7 @@ class Gauge final : public waybar::AModule {
   // are the tiers this gauge drew before they were configurable. Crossing INTO
   // a tier spawns that tier's hook -- config "on-warn" / "on-crit" /
   // "on-normal", each optional: an undefined one fires nothing. A hook may be
-  // scoped (and given a different command) per power source; see batt_hook.
+  // scoped (and given a different command) per power state; see batt_hook.
   double batt_warn_ = 0.40;     // green -> amber boundary
   double batt_crit_ = 0.20;     // amber -> red boundary
   BattState batt_state_ = BattState::Normal;
