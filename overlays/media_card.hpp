@@ -11,6 +11,7 @@
 
 #include "AModule.hpp"
 #include "bar.hpp"
+#include "np_frame.hpp"
 #include "spectrum.hpp"
 
 namespace waybar::modules::media {
@@ -32,12 +33,20 @@ class CardArea : public Gtk::DrawingArea {
 
 // A "now playing" card drawn in Cairo: a rounded cover-art thumbnail, the title
 // over artist / album, a play-state glyph, a cast badge, prev / play / next
-// transport, and a progress scrubber. Reads a JSON state file published by the
-// now-playing daemon (which merges local MPRIS and Chromecast), so it renders
-// whatever is live; transport routes back through the daemon's control FIFO via
-// np-ctl, so play/pause/skip work while casting too. The scrubber interpolates
-// between samples off a monotonic clock, so it advances smoothly without a fast
-// poll (the sysmon idiom). Registered as `media/card`.
+// transport, and a progress scrubber.
+//
+// A DUMB VIEW, deliberately. Everything it draws comes from the now-playing
+// daemon's shared-memory frame (np_frame.hpp; the spec is that package's
+// docs/contract.md): playback state, position, which transport controls are
+// usable, and eventually the spectrum. The card derives NO playback facts of
+// its own. It does not decide what "idle" means, does not extrapolate the
+// playhead from a wall clock, and does not ask any second source what is
+// playing. Transport goes back out through np-ctl, which the card treats as an
+// opaque command; it does not model what a command will do.
+//
+// What IS the card's own business: layout, colour, type, glyph shapes, the
+// marquee phase, peak-hold cap physics, decoding the cover art, and which
+// gesture maps to which command. Registered as `media/card`.
 class Card final : public waybar::AModule {
  public:
   Card(const std::string& id, const waybar::Bar& bar,
@@ -56,24 +65,21 @@ class Card final : public waybar::AModule {
   int hmargin_ = 6;      // bar padding left/right
   double ui_scale_ = 1.0;    // bar_height / 48; scales the text
                              // (1.0 on the base bar -> a strict no-op)
-  std::string state_path_;   // now-playing.state (daemon-published JSON)
   std::string ctl_cmd_;      // np-ctl helper (transport)
 
   CardArea area_;
-  sigc::connection poll_;    // re-reads the state file
-  sigc::connection frame_;   // scrubber redraw while playing
+  sigc::connection frame_;   // the ONE clock: samples the frame and redraws
 
-  // parsed state
-  std::string status_ = "idle";   // playing | paused | idle
-  std::string source_;            // cast | local
-  std::string device_;
-  std::string title_, artist_, album_;
-  std::string art_path_;
-  double position_ = 0.0, length_ = 0.0;   // seconds
-  double sample_mono_ = 0.0;                // monotonic secs at the sample
+  // The daemon's frame, verbatim. This is the card's whole model; no field
+  // below is computed from anything else.
+  np::Reader reader_;
+  np::Frame f_;
+  bool live_ = false;        // a fresh frame was read (else render nothing)
+  bool warned_version_ = false;
 
   // title marquee (Winamp-style linger-then-scroll)
-  double marquee_t0_ = 0.0;   // monotonic ref, reset on each new title
+  double marquee_t0_ = 0.0;   // monotonic ref, reset on each new track
+  std::uint32_t marquee_track_ = 0;   // the daemon's track id the phase is for
   bool overflowing_ = false;  // title wider than column -> 30fps redraw
   unsigned tick_ = 0;         // frame counter (marquee 30fps vs scrubber ~4fps)
   bool hovered_ = false;      // pointer over card -> refresh tooltip
@@ -86,9 +92,16 @@ class Card final : public waybar::AModule {
   int prev_x_ = 0, prev_w_ = 0, play_x_ = 0, play_w_ = 0,
       next_x_ = 0, next_w_ = 0;
 
-  // ---- audio spectrum (Winamp-style analyzer, local playback only) ----------
-  // Off by default; enable with "spectrum": true. Captures the local sink
-  // monitor, so it is silent (bands fall to zero) during a Chromecast.
+  // ---- audio spectrum (Winamp-style analyzer) -------------------------------
+  // The bands come from the FRAME when the daemon publishes them: the card is
+  // not told, and must not care, whether they were derived from a local sink
+  // monitor or from a cast-side reconstruction.
+  //
+  // TRANSITIONAL: until the daemon owns the analyser, a local capture here
+  // fills in when the frame carries no bands. That fallback (and spectrum.hpp,
+  // and every spectrum-* DSP key in this module's config) is scheduled for
+  // deletion; do not build on it. Signal config belongs with the producer, and
+  // only the LOOK keys below stay here.
   bool spectrum_on_ = false;
   std::unique_ptr<Spectrum> spec_;
   std::vector<float> levels_;   // current band levels 0..1 (from spec_)
@@ -107,10 +120,9 @@ class Card final : public waybar::AModule {
   double text_outline_ = 2.0;   // black outline (px) around the text glyphs, so
                                 // the names read over the colored analyzer
 
-  bool readState();
+  bool pollFrame();       // sample the daemon; true when the face changed
   void updateTooltip();   // full, untruncated info for the shared flush callout
   void ensureArt();
-  double livePosition() const;   // position_ advanced while playing
   void sendCtl(const std::string& cmd);
 
   bool on_draw(const Cairo::RefPtr<Cairo::Context>& cr);

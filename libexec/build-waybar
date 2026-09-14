@@ -77,6 +77,10 @@ cp "$OV/cal_card.cpp"   "$SRC/src/modules/cal/card.cpp"
 cp "$OV/flush_tooltip.hpp" "$SRC/include/flush_tooltip.hpp"
 cp "$OV/hover_zoom.hpp"    "$SRC/include/hover_zoom.hpp"
 cp "$OV/nvml.hpp"          "$SRC/include/nvml.hpp"
+# np_frame.hpp is the C++ half of the now-playing shared-memory contract (see
+# that package's docs/contract.md). Header-only and dependency-free, so
+# media/card reads the daemon's frame without waybar linking anything new.
+cp "$OV/np_frame.hpp"      "$SRC/include/np_frame.hpp"
 cp "$OV/spectrum.hpp"      "$SRC/include/spectrum.hpp"
 
 # --- restore tracked files to pristine, then apply our patches --------------

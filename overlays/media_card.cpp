@@ -6,10 +6,12 @@
 #include <glibmm/spawn.h>
 #include <pango/pangocairo.h>   // pango_cairo_layout_path (outlined text)
 
+#include <spdlog/spdlog.h>
+
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <fstream>
+#include <utility>
 
 #include "flush_tooltip.hpp"   // rich tooltip: album art + labelled lines
 
@@ -87,14 +89,14 @@ Card::Card(const std::string& id, const waybar::Bar& bar,
     spec_ = std::make_unique<Spectrum>(sc);
   }
 
-  const char* xrd = getenv("XDG_RUNTIME_DIR");
-  const std::string run = xrd ? xrd : "/tmp";
-  state_path_ = config_["state-path"].isString()
-                    ? expand_home(config_["state-path"].asString())
-                    : run + "/now-playing.state";
+  // The frame's path is FIXED by the contract, so there is nothing to point at
+  // and no `state-path` key any more: np::Reader knows where to look. The only
+  // remaining seam is the transport command, whose default is now the bare
+  // name resolved on PATH (the old ~/.config/waybar/scripts path died when
+  // np-ctl moved into the now-playing package).
   ctl_cmd_ = config_["ctl-cmd"].isString()
                  ? expand_home(config_["ctl-cmd"].asString())
-                 : expand_home("~/.config/waybar/scripts/np-ctl");
+                 : std::string("np-ctl");
 
   event_box_.set_name(id.empty() ? "media-card" : "media-card-" + id);
   area_.nat_w = width_;                          // full width when there's room
@@ -119,22 +121,15 @@ Card::Card(const std::string& id, const waybar::Bar& bar,
   event_box_.show_all();
 
   marquee_t0_ = now_mono();
-  readState();
-  poll_ = Glib::signal_timeout().connect_seconds(
-      [this]() {
-        readState();
-        area_.queue_draw();
-        return true;
-      },
-      1);
-  // 30fps clock: the marquee needs it while a long title scrolls; on_frame
-  // throttles to ~4fps otherwise (the scrubber) and idles when not playing.
+  pollFrame();
+  // ONE clock now. Sampling the frame is a memory read, not a syscall or a
+  // parse, so the 30fps tick doubles as the state poll: the old 1Hz file poll
+  // is gone, and with it the reason the card ever had to interpolate.
   frame_ = Glib::signal_timeout().connect(sigc::mem_fun(*this, &Card::on_frame),
                                           33);
 }
 
 Card::~Card() {
-  if (poll_.connected()) poll_.disconnect();
   if (frame_.connected()) frame_.disconnect();
 }
 
@@ -146,54 +141,59 @@ auto Card::update() -> void {
 bool Card::on_frame() {
   if (!area_.get_mapped()) return true;
   ++tick_;
-  const bool spec = spec_ && updateSpectrum();   // caps animate; true if lively
-  if (status_ != "playing") {
-    if (spec) area_.queue_draw();   // let the caps fall to rest after a stop
+  const bool changed = pollFrame();               // discrete change this tick
+  const bool spec = updateSpectrum();             // caps animate; lively?
+  if (!f_.playing()) {
+    // Let the caps fall to rest after a stop, and show a state change at once.
+    if (changed || spec) area_.queue_draw();
     return true;
   }
-  // 30fps while scrolling or the analyzer is live, else ~4fps (scrubber).
-  if (overflowing_ || spec || tick_ % 8 == 0) area_.queue_draw();
+  // 30fps while scrolling or the analyzer is live, else ~4fps for the
+  // scrubber. Whatever the rate, the position drawn is the daemon's own: a
+  // slower redraw is now just a slower redraw, not a staler number.
+  if (changed || overflowing_ || spec || tick_ % 8 == 0) area_.queue_draw();
+  // The callout shows elapsed time, so refresh it on the scrubber's cadence
+  // while the pointer is on the card (it is rebuilt on change otherwise).
+  if (hovered_ && tick_ % 8 == 0) updateTooltip();
   return true;
 }
 
-bool Card::readState() {
-  std::ifstream in(state_path_);
-  if (!in) {
-    status_ = "idle";
-    title_.clear();
-    updateTooltip();
+// Sample the daemon's frame. Returns true when something DISCRETE changed (the
+// track, the state, the artwork, which controls are usable) -- the same notion
+// of "eventful" the package's `status --follow` uses. Position deliberately
+// does not count: it moves every tick, and the redraw throttle above owns it.
+bool Card::pollFrame() {
+  np::Frame nf;
+  const np::Read rc = reader_.read(nf);
+  if (rc == np::Read::kContended) {
+    // A write was in flight. KEEP the last frame: blinking the card to idle
+    // for one tick is a worse lie than being 33ms behind.
     return false;
   }
-  Json::Value j;
-  Json::CharReaderBuilder b;
-  std::string err;
-  if (!Json::parseFromStream(b, in, &j, &err)) return false;
-
-  status_ = j.get("status", "idle").asString();
-  source_ = j.get("source", "").asString();
-  device_ = j.get("device", "").asString();
-  const std::string newtitle = j.get("title", "").asString();
-  if (newtitle != title_) marquee_t0_ = now_mono();   // restart scroll
-  title_ = newtitle;
-  artist_ = j.get("artist", "").asString();
-  album_ = j.get("album", "").asString();
-  art_path_ = expand_home(j.get("art", "").asString());
-  length_ = j.get("length", 0.0).asDouble();
-
-  // Fold any staleness of the sample into the starting position: the daemon
-  // stamps `at` (wall seconds) when it read `position`, so a sample sitting in
-  // the file for a while still starts from the right place, then interpolates.
-  double pos = j.get("position", 0.0).asDouble();
-  if (status_ == "playing" && j.isMember("at")) {
-    const double at = j["at"].asDouble();
-    const double wall = g_get_real_time() / 1e6;
-    if (at > 0 && wall >= at) pos += (wall - at);
+  if (rc == np::Read::kBadVersion && !warned_version_) {
+    warned_version_ = true;
+    spdlog::error(
+        "media/card: now-playing frame is layout v{}, this build reads v{}; "
+        "update waybar-mods and now-playing together",
+        reader_.bad_version(), np::kVersion);
   }
-  if (length_ > 0 && pos > length_) pos = length_;
-  position_ = pos;
-  sample_mono_ = now_mono();
-  updateTooltip();
-  return true;
+  const bool live = (rc == np::Read::kOk);
+  // Absent, stale or unreadable all mean the same thing to a view: there is no
+  // daemon behind this, so show nothing rather than a frozen last track.
+  if (!live) nf = np::Frame();
+  const bool changed = live != live_ || nf.track_id != f_.track_id ||
+                       nf.status != f_.status || nf.source != f_.source ||
+                       nf.caps != f_.caps || nf.art != f_.art ||
+                       nf.title != f_.title || nf.artist != f_.artist ||
+                       nf.album != f_.album || nf.device != f_.device;
+  live_ = live;
+  f_ = std::move(nf);
+  if (f_.track_id != marquee_track_) {
+    marquee_track_ = f_.track_id;      // the daemon says a new track began;
+    marquee_t0_ = now_mono();          // restart the scroll from its linger
+  }
+  if (changed) updateTooltip();
+  return changed;
 }
 
 // Full, untruncated now-playing info published as a tooltip-markup property on
@@ -202,7 +202,8 @@ bool Card::readState() {
 // song changes. Dynamic fields are markup-escaped.
 void Card::updateTooltip() {
   std::string t;   // empty when idle -> the callout hides
-  if (status_ != "idle" && !title_.empty()) {
+  // Idle is the DAEMON's verdict (status), never inferred from an empty title.
+  if (live_ && !f_.idle()) {
     auto esc = [](const std::string& s) {
       return Glib::Markup::escape_text(s).raw();
     };
@@ -211,41 +212,34 @@ void Card::updateTooltip() {
       return "<span fgcolor='#8a8f98'>" + std::string(label) + "</span>\t" +
              value;
     };
-    t = row("Title", "<b>" + esc(title_) + "</b>");
-    if (!artist_.empty()) t += "\n" + row("Artist", esc(artist_));
-    if (!album_.empty()) t += "\n" + row("Album", esc(album_));
-    if (source_ == "cast" && !device_.empty())
-      t += "\n" + row("Casting", esc(device_));
-    const std::string st = status_ == "playing"  ? "Playing"
-                           : status_ == "paused" ? "Paused"
-                                                 : "";
+    t = row("Title", "<b>" + esc(f_.title) + "</b>");
+    if (!f_.artist.empty()) t += "\n" + row("Artist", esc(f_.artist));
+    if (!f_.album.empty()) t += "\n" + row("Album", esc(f_.album));
+    if (f_.casting() && !f_.device.empty())
+      t += "\n" + row("Casting", esc(f_.device));
+    const std::string st = f_.playing() ? "Playing" : "Paused";
     std::string tv;
-    if (length_ > 0) tv = mmss(livePosition()) + " / " + mmss(length_);
-    if (!st.empty()) tv += (tv.empty() ? "" : "  ·  ") + st;
-    if (!tv.empty()) t += "\n" + row("Time", tv);
+    if (f_.length > 0) tv = mmss(f_.position) + " / " + mmss(f_.length);
+    tv += (tv.empty() ? "" : "  ·  ") + st;
+    t += "\n" + row("Time", tv);
   }
   event_box_.set_tooltip_markup(t);
-  FlushTooltip::setImage(event_box_, t.empty() ? std::string() : art_path_);
+  FlushTooltip::setImage(event_box_, t.empty() ? std::string() : f_.art);
   // If the card is hovered, refresh the SHOWN callout now so it tracks the card
   // face (a skip, play/pause, a new track) in sync instead of waiting for the
   // next hover. show() re-renders in place (empty markup hides it when idle).
   if (hovered_) FlushTooltip::instance().show(event_box_, t, false);
 }
 
-double Card::livePosition() const {
-  double p = position_;
-  if (status_ == "playing") p += now_mono() - sample_mono_;
-  if (length_ > 0 && p > length_) p = length_;
-  return p < 0 ? 0 : p;
-}
-
 void Card::ensureArt() {
-  if (art_path_ == art_loaded_) return;
-  art_loaded_ = art_path_;
+  if (f_.art == art_loaded_) return;
+  art_loaded_ = f_.art;
   art_.reset();
-  if (art_path_.empty()) return;
+  if (f_.art.empty()) return;
   try {
-    art_ = Gdk::Pixbuf::create_from_file(art_path_);
+    // Always a local path: the daemon downloads remote artwork and publishes
+    // where it landed, so a view only ever opens a file.
+    art_ = Gdk::Pixbuf::create_from_file(f_.art);
   } catch (const Glib::Error&) {
     art_.reset();
   }
@@ -318,7 +312,10 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
   const double w = area_.get_allocated_width();
   const double h = area_.get_allocated_height();
   if (w <= 0 || h <= 0) return true;
-  const bool idle = (status_ == "idle") || title_.empty();
+  // Idle is the DAEMON's verdict, plus "there is no daemon". The card used to
+  // second-guess it with `|| title_.empty()`, which was a second definition of
+  // idleness free to disagree with the first.
+  const bool idle = !live_ || f_.idle();
   const double dim = idle ? 0.45 : 1.0;   // whole card fades when idle
 
   // Card text scales with the bar height (ui_scale_ = bar_h / 48). ONE-SIDED:
@@ -394,7 +391,7 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
   cr->restore();
 
   // Cast badge overlaid on the art's top-left when the source is a Chromecast.
-  if (source_ == "cast" && !idle) {
+  if (f_.casting() && !idle) {
     cr->save();
     roundRect(ax + 3, ay + 3, art * 0.34, art * 0.30, 3);
     cr->set_source_rgba(0.05, 0.05, 0.07, 0.72);
@@ -408,8 +405,8 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
   // progress bar (so the two read as one unit) and set just left of the bar's
   // start with a breathing gap. Black-outlined, reads even where it bleeds
   // off the artwork.
-  if (!idle && length_ > 0) {
-    auto tl = area_.create_pango_layout(mmss(livePosition()));
+  if (!idle && f_.length > 0) {
+    auto tl = area_.create_pango_layout(mmss(f_.position));
     tl->set_font_description(scaled_font("Sans Bold", 7));
     int tlw = 0, tlh = 0;
     tl->get_pixel_size(tlw, tlh);
@@ -438,12 +435,24 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
   const double play_cx = next_cx - (skip + gap + play);
   const double prev_cx = play_cx - (play + gap + skip);
   const double tcol = idle ? 0.42 : 0.86;
-  cr->set_source_rgba(tcol, tcol, tcol * 1.02, dim);
+  // A control the LIVE SOURCE cannot honour is drawn inert. The daemon says
+  // which (a cast app that ignores previous-track is the usual case); the card
+  // does not guess, and does not offer an affordance that would do nothing.
+  auto ctlColour = [&](bool usable) {
+    const double c = usable ? tcol : tcol * 0.40;
+    cr->set_source_rgba(c, c, c * 1.02, dim);
+  };
+  ctlColour(!idle && f_.can(np::kCapPrev));
   glyphPrev(cr, prev_cx, cy, skip);
-  if (status_ == "playing")
+  // Play/pause is NOT capability-gated: it is also the whole-card click
+  // target, so refusing it would read as a dead card rather than a dimmed
+  // button. The gating that matters is the skip pair above.
+  ctlColour(true);
+  if (f_.playing())
     glyphPause(cr, play_cx, cy, play);
   else
     glyphPlay(cr, play_cx, cy, play);
+  ctlColour(!idle && f_.can(np::kCapNext));
   glyphNext(cr, next_cx, cy, skip);
   prev_x_ = static_cast<int>(prev_cx - skip - 4);
   prev_w_ = static_cast<int>(2 * skip + 8);
@@ -468,11 +477,13 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
   if (tw > 24) {
     const double row1 = 2, row2 = h * 0.48;
     const double v = 42.0, tlin = 3.5, tend = 1.0;   // slower lead, quick tail
-    const bool hasAlbum = !idle && !album_.empty();
+    const bool hasAlbum = !idle && !f_.album.empty();
 
     // Analyzer confined to the progress-bar column [tx, tx+tw] -- never under
     // the art or the transport. Drawn first, so the text sits over it.
-    if (spec_ && spectrum_on_ && !idle) {
+    // Draw whenever we HAVE bands, whatever produced them; the card must
+    // not care whether the daemon or the fallback capture supplied them.
+    if (spectrum_on_ && !idle && !levels_.empty()) {
       cr->save();
       cr->rectangle(tx - 2, 0, tw + 4, h);
       cr->clip();
@@ -484,7 +495,7 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     // the open margins (over the art gap, under the transport) and glows dimmed
     // behind the names, which now sit on their own dark strip and read clearly.
     // Soft left/right edges so it blends into the card, not a hard box.
-    if (spec_ && spectrum_on_ && !idle && text_scrim_ > 0.0) {
+    if (spectrum_on_ && !idle && !levels_.empty() && text_scrim_ > 0.0) {
       const double sx0 = tx - 6, sx1 = tright + 4;
       const double sy0 = 1.5, sy1 = h - 3;
       const double sr = std::min(6.0, (sy1 - sy0) * 0.45);
@@ -504,7 +515,7 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
 
     // title layout + overflow
     auto titleLay =
-        area_.create_pango_layout(idle ? "Nothing playing" : title_);
+        area_.create_pango_layout(idle ? "Nothing playing" : f_.title);
     titleLay->set_font_description(scaled_font("Sans Bold", 10));
     int tfw = 0, tfh = 0;
     titleLay->get_pixel_size(tfw, tfh);
@@ -514,8 +525,8 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     // ellipsized past the cap; album takes the rest and scrolls.
     Glib::RefPtr<Pango::Layout> artLay, albLay, sepLay;
     double aw = 0, alb_x = tx, alb_avail = 0, ov_alb = 0;
-    if (!idle && !artist_.empty()) {
-      artLay = area_.create_pango_layout(artist_);
+    if (!idle && !f_.artist.empty()) {
+      artLay = area_.create_pango_layout(f_.artist);
       artLay->set_font_description(scaled_font("Sans", 9));
       int afw = 0, afh = 0;
       artLay->get_pixel_size(afw, afh);
@@ -526,13 +537,13 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
       }
     }
     if (hasAlbum) {
-      sepLay = area_.create_pango_layout(artist_.empty() ? "" : "  ·  ");
+      sepLay = area_.create_pango_layout(f_.artist.empty() ? "" : "  ·  ");
       sepLay->set_font_description(scaled_font("Sans", 9));
       int sw = 0, sfh = 0;
       sepLay->get_pixel_size(sw, sfh);
       alb_x = tx + aw + sw;
       alb_avail = std::max(10.0, tright - alb_x);
-      albLay = area_.create_pango_layout(album_);
+      albLay = area_.create_pango_layout(f_.album);
       albLay->set_font_description(scaled_font("Sans", 9));
       int lfw = 0, lfh = 0;
       albLay->get_pixel_size(lfw, lfh);
@@ -548,7 +559,7 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     double ph = std::fmod(now_mono() - marquee_t0_, cyc);
     if (ph < 0) ph += cyc;
     auto offOf = [&](double ov) -> double {
-      if (ov <= 2 || status_ != "playing") return 0.0;
+      if (ov <= 2 || !f_.playing()) return 0.0;
       const double tscr = ov / v;
       if (ph < tlin) return 0.0;
       if (ph < tlin + tscr) return (ph - tlin) * v;
@@ -629,8 +640,9 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     const double sy = h - pad + 0.5;
     const double sh = 2.0;
     const double frac =
-        (length_ > 0) ? std::min(1.0, std::max(0.0, livePosition() / length_))
-                      : 0.0;
+        (f_.length > 0)
+            ? std::min(1.0, std::max(0.0, f_.position / f_.length))
+            : 0.0;
     roundRect(tx, sy, tw, sh, sh / 2);
     cr->set_source_rgba(1, 1, 1, 0.12 * dim);
     cr->fill();
@@ -646,13 +658,19 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
 
 // ---- spectrum: peak-hold animation + dithered render ----------------------
 bool Card::updateSpectrum() {
-  if (!spec_) return false;
+  if (!spectrum_on_) return false;
+  if (!f_.bands.empty()) {
+    levels_ = f_.bands;        // the daemon's bands: the contract's source
+  } else if (spec_) {
+    spec_->read(levels_);      // TRANSITIONAL local capture; see the header
+  } else {
+    return false;
+  }
   const double now = now_mono();
   double dt = spec_last_ > 0 ? now - spec_last_ : 0.0;
   spec_last_ = now;
   if (dt > 0.1) dt = 0.1;   // clamp after a stall so caps don't jump
-  spec_->read(levels_);     // 0..1 per band, already attack/decay-smoothed
-  bool alive = false;
+  bool alive = false;       // levels_ was filled above, from frame or capture
   const int n = static_cast<int>(levels_.size());
   if (static_cast<int>(caps_.size()) != n) {
     caps_.assign(n, 0.0f);
@@ -767,23 +785,28 @@ void Card::drawSpectrum(const Cairo::RefPtr<Cairo::Context>& cr, double bx0,
   }
 }
 
+// Input is mapped to a command and forwarded verbatim. The card does not model
+// what a command will DO, only whether the daemon says the live source can
+// take it -- matching what the glyphs are drawn to promise.
 bool Card::on_button(GdkEventButton* e) {
   if (e->type != GDK_BUTTON_PRESS || e->button != 1) return false;
   const int x = static_cast<int>(e->x);
-  if (x >= prev_x_ && x < prev_x_ + prev_w_)
-    sendCtl("previous");
-  else if (x >= next_x_ && x < next_x_ + next_w_)
-    sendCtl("next");
-  else
+  if (x >= prev_x_ && x < prev_x_ + prev_w_) {
+    if (f_.can(np::kCapPrev)) sendCtl("previous");
+  } else if (x >= next_x_ && x < next_x_ + next_w_) {
+    if (f_.can(np::kCapNext)) sendCtl("next");
+  } else {
     sendCtl("playpause");   // play/pause glyph or anywhere else on the card
+  }
   return true;
 }
 
 bool Card::on_scroll(GdkEventScroll* e) {
-  if (e->direction == GDK_SCROLL_UP)
-    sendCtl("next");
-  else if (e->direction == GDK_SCROLL_DOWN)
-    sendCtl("previous");
+  if (e->direction == GDK_SCROLL_UP) {
+    if (f_.can(np::kCapNext)) sendCtl("next");
+  } else if (e->direction == GDK_SCROLL_DOWN) {
+    if (f_.can(np::kCapPrev)) sendCtl("previous");
+  }
   return true;
 }
 
