@@ -61,12 +61,19 @@ Graph::Graph(const std::string& id, const waybar::Bar& bar,
   const double ui = bar_.config["height"].isInt()
                         ? bar_.config["height"].asInt() / 48.0
                         : 1.0;
-  // The graph WIDTH tracks the bar, ONE-SIDED: scaling UP (wall) it widens
-  // faster (1.5x at the wall's 1.25 ui -- amplify the deviation, room to spare)
-  // scaling DOWN (a compact low-res bar) it goes ~15% NARROWER than the height
-  // ratio, so all EIGHT graphs fit at once WITH room to keep the clock centred.
-  // A no-op at base (ui == 1). Font tracks height.
-  const double wf = ui < 1.0 ? ui * 0.84 : 1.0 + (ui - 1.0) * 2.0;
+  // The graph WIDTH tracks the bar, ONE-SIDED: scaling UP it widens FASTER
+  // than the height ratio (1.35x at the tall bar's 1.25 ui -- amplify the
+  // deviation, a tall bar means a big desk). Scaling DOWN (a compact low-res
+  // bar) it goes ~15% NARROWER than the height ratio, so all EIGHT graphs fit
+  // at once WITH room to keep the clock centred. A no-op at base (ui == 1).
+  //
+  // The UP coefficient was 2.0 (1.5x) until 2026-09-18. It was cut to 1.4 when
+  // bar_height_for() started handing a 4K SINGLE panel the wall's height: that
+  // bar is one output wide, not three, and its right lane also carries
+  // now-playing (top-right.single.jsonc), which the eight-graph centre block
+  // was crowding. The wall has the width to spare either way. Trimming here
+  // rather than in modules.core.jsonc keeps the 48px base a strict no-op.
+  const double wf = ui < 1.0 ? ui * 0.84 : 1.0 + (ui - 1.0) * 1.4;
   graph_width_ = static_cast<int>(graph_width_ * wf + 0.5);
   // The legend font tracks height, ONE-SIDED with an EXTRA shrink DOWN: at a
   // straight ratio the text hogs the short compact well, so take another ~20%
