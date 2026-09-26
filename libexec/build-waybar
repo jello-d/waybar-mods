@@ -61,6 +61,8 @@ mkdir -p \
 
 cp "$OV/taskbar.hpp"    "$SRC/include/modules/wayfire/taskbar.hpp"
 cp "$OV/taskbar.cpp"    "$SRC/src/modules/wayfire/taskbar.cpp"
+cp "$OV/grid.hpp"       "$SRC/include/modules/wayfire/grid.hpp"
+cp "$OV/grid.cpp"       "$SRC/src/modules/wayfire/grid.cpp"
 cp "$OV/sysmon.hpp"     "$SRC/include/modules/sysmon/graph.hpp"
 cp "$OV/sysmon.cpp"     "$SRC/src/modules/sysmon/graph.cpp"
 cp "$OV/gauge.hpp"      "$SRC/include/modules/hw/gauge.hpp"
@@ -82,6 +84,10 @@ cp "$OV/nvml.hpp"          "$SRC/include/nvml.hpp"
 # media/card reads the daemon's frame without waybar linking anything new.
 cp "$OV/np_frame.hpp"      "$SRC/include/np_frame.hpp"
 cp "$OV/spectrum.hpp"      "$SRC/include/spectrum.hpp"
+# wf_ipc.hpp is wayfire's IPC transport (framing + request/response + the event
+# stream), shared by the wayfire/* modules so a second one does not carry a
+# second copy of the wire format.
+cp "$OV/wf_ipc.hpp"        "$SRC/include/wf_ipc.hpp"
 
 # --- restore tracked files to pristine, then apply our patches --------------
 # A reused checkout still carries a prior run's applied patches as local edits;

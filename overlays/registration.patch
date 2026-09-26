@@ -2,11 +2,12 @@ diff --git a/meson.build b/meson.build
 index 0675a963..0e7788fa 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -276,6 +276,13 @@ if true
+@@ -276,6 +276,14 @@ if true
      src_files += files('src/modules/wlr/taskbar.cpp')
      man_files += files('man/waybar-wlr-taskbar.5.scd')
  endif
 +    src_files += files('src/modules/wayfire/taskbar.cpp')
++    src_files += files('src/modules/wayfire/grid.cpp')
 +    src_files += files('src/modules/sysmon/graph.cpp')
 +    src_files += files('src/modules/hw/gauge.cpp')
 +    src_files += files('src/modules/analog/clock.cpp')
@@ -20,11 +21,12 @@ diff --git a/src/factory.cpp b/src/factory.cpp
 index 7828ce75..4a1bca8f 100644
 --- a/src/factory.cpp
 +++ b/src/factory.cpp
-@@ -17,6 +17,13 @@
+@@ -17,6 +17,14 @@
  #ifdef HAVE_WLR_TASKBAR
  #include "modules/wlr/taskbar.hpp"
  #endif
 +#include "modules/wayfire/taskbar.hpp"
++#include "modules/wayfire/grid.hpp"
 +#include "modules/sysmon/graph.hpp"
 +#include "modules/hw/gauge.hpp"
 +#include "modules/analog/clock.hpp"
@@ -34,12 +36,15 @@ index 7828ce75..4a1bca8f 100644
  #ifdef HAVE_EXT_WORKSPACES
  #include "modules/ext/workspace_manager.hpp"
  #endif
-@@ -178,6 +185,27 @@ waybar::AModule* waybar::Factory::makeModule(const std::string& name,
+@@ -178,6 +186,30 @@ waybar::AModule* waybar::Factory::makeModule(const std::string& name,
        return new waybar::modules::wlr::Taskbar(id, bar_, config_[name]);
      }
  #endif
 +    if (ref == "wayfire/taskbar") {
 +      return new waybar::modules::wayfire::Taskbar(id, bar_, config_[name]);
++    }
++    if (ref == "wayfire/grid") {
++      return new waybar::modules::wayfire::Grid(id, bar_, config_[name]);
 +    }
 +    if (ref == "sysmon/graph") {
 +      return new waybar::modules::sysmon::Graph(id, bar_, config_[name]);
