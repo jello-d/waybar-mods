@@ -1,14 +1,10 @@
 #include "modules/wayfire/taskbar.hpp"
 
 #include <fcntl.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
-#include <cstring>
-#include <sstream>
 #include <stdexcept>
 
 #include <gdkmm/general.h>
@@ -16,77 +12,13 @@
 
 namespace waybar::modules::wayfire {
 
-static uint32_t read_u32_le(int fd) {
-  uint8_t b[4];
-  ssize_t n = ::read(fd, b, 4);
-  if (n != 4) throw std::runtime_error("short read header");
-  return (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
-         ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-}
-
-static void write_u32_le(int fd, uint32_t v) {
-  uint8_t b[4] = {(uint8_t)(v & 0xff), (uint8_t)((v >> 8) & 0xff),
-                  (uint8_t)((v >> 16) & 0xff), (uint8_t)((v >> 24) & 0xff)};
-  ssize_t n = ::send(fd, b, 4, MSG_NOSIGNAL);
-  if (n != 4) throw std::runtime_error("short write header");
-}
-
-static std::string read_exact(int fd, size_t n) {
-  std::string out;
-  out.resize(n);
-  size_t off = 0;
-  while (off < n) {
-    ssize_t r = ::read(fd, out.data() + off, n - off);
-    if (r <= 0) throw std::runtime_error("socket closed");
-    off += (size_t)r;
-  }
-  return out;
-}
-
-static void write_all(int fd, const std::string& s) {
-  size_t off = 0;
-  while (off < s.size()) {
-    ssize_t w = ::send(fd, s.data() + off, s.size() - off, MSG_NOSIGNAL);
-    if (w <= 0) throw std::runtime_error("socket write failed");
-    off += (size_t)w;
-  }
-}
-
-static int64_t j_i64(const Json::Value& obj, const char* key, int64_t def) {
-  if (!obj.isObject() || !obj.isMember(key)) return def;
-  const auto& v = obj[key];
-  if (v.isInt64()) return v.asInt64();
-  if (v.isUInt64()) return (int64_t)v.asUInt64();
-  if (v.isInt()) return v.asInt();
-  if (v.isUInt()) return v.asUInt();
-  return def;
-}
-
-static std::string j_str(const Json::Value& obj, const char* key,
-                         const std::string& def = "") {
-  if (!obj.isObject() || !obj.isMember(key)) return def;
-  const auto& v = obj[key];
-  return v.isString() ? v.asString() : def;
-}
-
-static bool j_bool(const Json::Value& obj, const char* key, bool def) {
-  if (!obj.isObject() || !obj.isMember(key)) return def;
-  const auto& v = obj[key];
-  if (v.isBool()) return v.asBool();
-  if (v.isInt()) return (v.asInt() != 0);
-  return def;
-}
-
-static std::string resolve_wayfire_socket(const Json::Value& cfg) {
-  if (cfg.isObject() && cfg.isMember("socket") && cfg["socket"].isString()) {
-    return cfg["socket"].asString();
-  }
-  if (const char* env = std::getenv("WAYFIRE_SOCKET")) {
-    return env;
-  }
-  return "/run/user/" + std::to_string(getuid()) +
-         "/wayfire-wayland-1-.socket";
-}
+// The IPC transport (the length-prefixed JSON framing, the request/response
+// channel, the event stream) and the tolerant JSON readers live in wf_ipc.hpp,
+// shared with wayfire/grid. They were duplicated here first; importing the
+// names rather than qualifying them keeps every call site below unchanged.
+using waybar::wf::j_bool;
+using waybar::wf::j_i64;
+using waybar::wf::j_str;
 
 static bool vec_contains(const std::vector<int64_t>& v, int64_t id) {
   return std::find(v.begin(), v.end(), id) != v.end();
@@ -114,10 +46,11 @@ Taskbar::Taskbar(const std::string& id, const waybar::Bar& bar,
       bar_(bar),
       config_(config),
       box_(bar.orientation, 0) {
-  socket_path_ = resolve_wayfire_socket(config_);
+  socket_path_ = waybar::wf::resolve_socket(config_);
   if (socket_path_.empty()) {
     throw std::runtime_error("wayfire/taskbar: no socket path");
   }
+  ipc_ = std::make_unique<waybar::wf::Client>(socket_path_);
 
   if (config_["reconcile-interval"].isInt())
     reconcile_ms_ = config_["reconcile-interval"].asInt();
@@ -185,116 +118,30 @@ Taskbar::~Taskbar() {
   if (refresh_pending_.connected()) refresh_pending_.disconnect();
   if (timer_.connected()) timer_.disconnect();
   if (evt_fd_ >= 0) { ::close(evt_fd_); evt_fd_ = -1; }
-  disconnect_socket();
+  // The request/response fd closes with the Client; nothing to do by hand.
 }
 
-void Taskbar::connect_socket() {
-  if (sock_fd_ >= 0) return;
-
-  int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0) throw std::runtime_error("socket() failed");
-
-  sockaddr_un addr {};
-  addr.sun_family = AF_UNIX;
-  if (socket_path_.size() >= sizeof(addr.sun_path)) {
-    ::close(fd);
-    throw std::runtime_error("socket path too long");
-  }
-  std::strncpy(addr.sun_path, socket_path_.c_str(),
-               sizeof(addr.sun_path) - 1);
-
-  if (::connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-    ::close(fd);
-    std::ostringstream ss;
-    ss << "connect() failed: " << std::strerror(errno);
-    throw std::runtime_error(ss.str());
-  }
-  sock_fd_ = fd;
-}
-
-void Taskbar::disconnect_socket() {
-  if (sock_fd_ >= 0) {
-    ::close(sock_fd_);
-    sock_fd_ = -1;
-  }
-}
-
+// A thin forwarder onto the shared channel, kept as a member so the nine call
+// sites below read unchanged. waybar::wf::Client owns what this used to do
+// inline: one persistent connection, one transparent reconnect on a transport
+// fault, and a parsed {"error": ...} thrown WITHOUT re-sending, so an
+// application error never silently repeats a mutating call.
 Json::Value Taskbar::rpc(const std::string& method,
                          const Json::Value& data_in) {
-  Json::Value data = data_in.isObject() ? data_in
-                                        : Json::Value(Json::objectValue);
-  Json::Value msg;
-  msg["method"] = method;
-  msg["data"] = data;
-
-  Json::StreamWriterBuilder wb;
-  wb["indentation"] = "";
-  const std::string payload = Json::writeString(wb, msg);
-
-  // Persistent connection: open once, reuse every call. A stale fd costs one
-  // transparent reconnect, not a lost tick. Transport faults reconnect; a
-  // parsed {"error": ...} does not, so an application error never silently
-  // re-sends a mutating call.
-  std::string resp;
-  bool got = false;
-  for (int attempt = 0; attempt < 2 && !got; ++attempt) {
-    try {
-      connect_socket();
-      write_u32_le(sock_fd_, (uint32_t)payload.size());
-      write_all(sock_fd_, payload);
-      uint32_t resp_len = read_u32_le(sock_fd_);
-      resp = read_exact(sock_fd_, resp_len);
-      got = true;
-    } catch (const std::runtime_error&) {
-      disconnect_socket();
-      if (attempt == 1) throw;
-    }
-  }
-
-  Json::CharReaderBuilder rb;
-  std::string errs;
-  Json::Value root;
-  std::istringstream iss(resp);
-  if (!Json::parseFromStream(rb, iss, &root, &errs)) {
-    throw std::runtime_error("invalid json response: " + errs);
-  }
-  if (root.isObject() && root.isMember("error")) {
-    throw std::runtime_error(root["error"].asString());
-  }
-  return root;
+  return ipc_->call(method, data_in);
 }
 
 void Taskbar::start_events() {
   try {
     if (evt_fd_ >= 0) { ::close(evt_fd_); evt_fd_ = -1; }
 
-    int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) throw std::runtime_error("event socket() failed");
-
-    sockaddr_un addr {};
-    addr.sun_family = AF_UNIX;
-    std::strncpy(addr.sun_path, socket_path_.c_str(),
-                 sizeof(addr.sun_path) - 1);
-    if (::connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-      ::close(fd);
-      throw std::runtime_error("event connect() failed");
-    }
-    evt_fd_ = fd;
-
-    // Subscribe to ALL events by sending no "events" list. Wayfire's watch
+    // Connects and subscribes to ALL events (no "events" list). Wayfire's watch
     // rejects the entire request if any named event is unknown (ipc-rules
     // returns "Event not found"), which makes a curated list a version
     // landmine. Subscribing to everything can't be rejected and survives
-    // Wayfire upgrades; on_event_io filters for relevance.
-    Json::Value msg;
-    msg["method"] = "window-rules/events/watch";
-    msg["data"] = Json::Value(Json::objectValue);
-
-    Json::StreamWriterBuilder wb;
-    wb["indentation"] = "";
-    const std::string payload = Json::writeString(wb, msg);
-    write_u32_le(evt_fd_, (uint32_t)payload.size());
-    write_all(evt_fd_, payload);
+    // Wayfire upgrades; on_event_io filters for relevance. That reasoning now
+    // lives with the helper, in wf_ipc.hpp.
+    evt_fd_ = waybar::wf::open_event_stream(socket_path_);
 
     // The subscription ack is just a non-event message that on_event_io
     // reads and ignores; no synchronous drain needed.
@@ -318,15 +165,8 @@ bool Taskbar::on_event_io(Glib::IOCondition cond) {
     return false;
   }
   try {
-    uint32_t len = read_u32_le(evt_fd_);
-    std::string payload = read_exact(evt_fd_, len);
-
-    Json::CharReaderBuilder rb;
-    std::string errs;
-    Json::Value root;
-    std::istringstream iss(payload);
-    if (Json::parseFromStream(rb, iss, &root, &errs) &&
-        root.isObject() && root.isMember("event")) {
+    const Json::Value root = waybar::wf::read_msg(evt_fd_);
+    if (root.isObject() && root.isMember("event")) {
       // Refresh on anything that can change what the bar shows; skip the
       // high-frequency events that never do.
       const std::string ev = root["event"].asString();

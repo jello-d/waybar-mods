@@ -17,6 +17,7 @@
 
 #include "AModule.hpp"
 #include "bar.hpp"
+#include "wf_ipc.hpp"
 
 namespace waybar::modules::wayfire {
 
@@ -84,8 +85,8 @@ class Taskbar final : public AModule {
   };
   std::map<int64_t, std::unique_ptr<Item>> items_;
 
-  // IPC
-  int sock_fd_ = -1;                  // request/response connection
+  // IPC (transport in wf_ipc.hpp, shared with wayfire/grid)
+  std::unique_ptr<waybar::wf::Client> ipc_;   // request/response channel
   int evt_fd_  = -1;                  // event-stream connection
   sigc::connection evt_io_;           // GLib IO watch on evt_fd_
   sigc::connection refresh_pending_;  // debounce timer
@@ -94,8 +95,6 @@ class Taskbar final : public AModule {
   int reconcile_ms_ = 10000;
   bool geom_synced_ = false;  // output geometry+workspace cache valid?
 
-  void connect_socket();
-  void disconnect_socket();
   Json::Value rpc(const std::string& method, const Json::Value& data);
 
   void start_events();

@@ -201,4 +201,13 @@ inline std::string j_str(const Json::Value& obj, const char* key,
   return v.isString() ? v.asString() : def;
 }
 
+// Accepts an int as well as a bool: some wayfire fields are emitted as 0/1.
+inline bool j_bool(const Json::Value& obj, const char* key, bool def) {
+  if (!obj.isObject() || !obj.isMember(key)) return def;
+  const auto& v = obj[key];
+  if (v.isBool()) return v.asBool();
+  if (v.isInt()) return v.asInt() != 0;
+  return def;
+}
+
 }  // namespace waybar::wf
