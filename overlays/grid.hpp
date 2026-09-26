@@ -96,6 +96,8 @@ class Grid final : public waybar::AModule {
   Layout layout(int w, int h) const;
   int want_width() const;          // width request for the learned grid
   void apply_width();
+  void on_alloc(Gtk::Allocation& a);
+  int alloc_h_ = 0;                // height GTK actually gave us, 0 = not yet
 
   bool on_draw(const Cairo::RefPtr<Cairo::Context>& cr);
   bool on_press(GdkEventButton* e);

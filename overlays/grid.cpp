@@ -62,6 +62,7 @@ Grid::Grid(const std::string& id, const waybar::Bar& bar,
   area_.set_margin_start(hmargin_);
   area_.set_margin_end(hmargin_);
   area_.signal_draw().connect(sigc::mem_fun(*this, &Grid::on_draw));
+  area_.signal_size_allocate().connect(sigc::mem_fun(*this, &Grid::on_alloc));
   event_box_.add(area_);
   event_box_.show_all();
 
@@ -254,10 +255,22 @@ Grid::Layout Grid::layout(int w, int h) const {
   Layout l;
   if (grid_w_ <= 0 || grid_h_ <= 0) return l;
   const double gaps_y = gap_ * (grid_h_ - 1);
+  const double gaps_x = gap_ * (grid_w_ - 1);
   l.cell_h = (h - gaps_y) / grid_h_;
   if (l.cell_h < 1.0) l.cell_h = 1.0;
   l.cell_w = l.cell_h * cell_aspect_;
-  const double total_w = l.cell_w * grid_w_ + gap_ * (grid_w_ - 1);
+  // Never wider than the room we were actually GIVEN. The height budget alone
+  // can ask for more width than the allocation, and then the grid is drawn
+  // centred on a negative origin and GTK clips the end columns: the leftmost
+  // border went missing exactly this way. Shrinking to fit is always better
+  // than a silently cropped cell, and this is the backstop that holds even if
+  // the width request below is ever wrong again.
+  const double max_cell_w = (w - gaps_x) / grid_w_;
+  if (max_cell_w > 0.0 && l.cell_w > max_cell_w) {
+    l.cell_w = max_cell_w;
+    l.cell_h = l.cell_w / cell_aspect_;
+  }
+  const double total_w = l.cell_w * grid_w_ + gaps_x;
   const double total_h = l.cell_h * grid_h_ + gaps_y;
   l.x0 = (w - total_w) / 2.0;    // centred, so a width request that is off by a
   l.y0 = (h - total_h) / 2.0;    // pixel does not shove the grid off-centre
@@ -266,18 +279,31 @@ Grid::Layout Grid::layout(int w, int h) const {
 
 int Grid::want_width() const {
   if (grid_w_ <= 0 || grid_h_ <= 0) return 1;
-  // The drawing height is not known until the first allocation, so the REQUEST
-  // is computed from the configured bar height instead. layout() then works off
-  // the real allocation, and centres, so the two disagreeing is cosmetic.
+  // Ask off the height we ACTUALLY got, falling back to the configured bar
+  // height only before the first allocation. The two are not the same and
+  // assuming they were is what clipped the leftmost border: the bar row is
+  // taller than its configured height, so cells drawn at the real height came
+  // out wider than a request sized from the configured one, and the overflow
+  // was cropped at the edges. on_alloc re-asks whenever the height changes.
   const double nominal_h =
       (bar_.config["height"].isInt() ? bar_.config["height"].asInt() : 48) -
       2.0 * vmargin_;
-  const double cell_h = (nominal_h - gap_ * (grid_h_ - 1)) / grid_h_;
+  const double h = alloc_h_ > 0 ? static_cast<double>(alloc_h_) : nominal_h;
+  const double cell_h = (h - gap_ * (grid_h_ - 1)) / grid_h_;
   const double cell_w = std::max(1.0, cell_h) * cell_aspect_;
   return static_cast<int>(cell_w * grid_w_ + gap_ * (grid_w_ - 1) + 0.5);
 }
 
 void Grid::apply_width() { area_.set_size_request(want_width(), -1); }
+
+// Re-ask for width when the height we are given changes. Converges rather than
+// looping: the new request changes only the WIDTH, so the allocation that comes
+// back carries the same height and this returns early.
+void Grid::on_alloc(Gtk::Allocation& a) {
+  if (a.get_height() == alloc_h_) return;
+  alloc_h_ = a.get_height();
+  apply_width();
+}
 
 // ---- drawing -------------------------------------------------------------
 
