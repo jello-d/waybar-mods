@@ -297,6 +297,11 @@ void Gauge::read_volume() {
   if (!audio_) return;
   level_ = audio_->getSinkVolume() / 100.0;
   muted_ = audio_->getSinkMuted();
+  // The mic rides along because middle click mutes it (see on_press). The
+  // backend subscribes to PA_SUBSCRIPTION_MASK_SOURCE, so this is current
+  // however the mic was muted -- our gesture, a keybind, or mute-on-lock.
+  mic_level_ = audio_->getSourceVolume() / 100.0;
+  mic_muted_ = audio_->getSourceMuted();
 }
 
 void Gauge::read_temp() {
@@ -477,12 +482,18 @@ void Gauge::update_tooltip() {
     std::snprintf(buf, sizeof buf, "Brightness %d%%", pct);
     tt = buf;
   } else if (kind_ == Kind::Volume) {
-    if (muted_) {
-      std::snprintf(buf, sizeof buf, "Volume %d%%  (muted)", pct);
-    } else {
-      std::snprintf(buf, sizeof buf, "Volume %d%%", pct);
-    }
+    std::snprintf(buf, sizeof buf, "Volume %d%%%s\n", pct,
+                  muted_ ? "  (muted)" : "");
     tt = buf;
+    // The MIC is reported here because middle click can mute it while the
+    // speaker ring shows nothing about it. A control whose effect cannot be
+    // read back anywhere is exactly the invisible state this popup exists to
+    // prevent, so the line is UNCONDITIONAL: a mic line that appeared only
+    // when muted could not be told apart from one that failed to render.
+    std::snprintf(buf, sizeof buf, "Mic %d%%%s",
+                  static_cast<int>(mic_level_ * 100.0 + 0.5),
+                  mic_muted_ ? "  (muted)" : "");
+    tt += buf;
   } else if (kind_ == Kind::Temp) {
     std::snprintf(buf, sizeof buf, "%s  %.0f °F  (%.0f °C)",
                   gpu_ ? "GPU" : "CPU",
@@ -659,9 +670,24 @@ bool Gauge::handleScroll(GdkEventScroll* e) {
   return true;
 }
 
+// The two mute gestures on the volume knob: RIGHT mutes the speaker alone,
+// MIDDLE mutes the speaker AND the mic together as one "silence everything".
+//
+// The mic is SET to the state the speaker is heading for, never toggled on its
+// own. Two independent toggles would UNMUTE an already-muted mic whenever the
+// speaker was live, so the one gesture meant to silence everything would open
+// the mic mid-call -- the opposite of what it is for. Reading the speaker's
+// mute BEFORE firing the toggle below is what makes the target the speaker's
+// NEW state; the osd() spawn cannot have landed yet.
+//
+// Pass the bool. AudioBackend's no-arg toggleSourceMute() is BROKEN upstream:
+// it assigns `source_muted_ = !muted_`, negating the SINK's mute, so a mic
+// toggle would follow the speaker's old state. The explicit setter is correct.
 bool Gauge::on_press(GdkEventButton* e) {
-  if (kind_ == Kind::Volume && e->button == 3) {   // right-click mutes
-    osd("mute-toggle");
+  if (kind_ == Kind::Volume && (e->button == 2 || e->button == 3)) {
+    if (e->button == 2 && audio_)
+      audio_->toggleSourceMute(!audio_->getSinkMuted());
+    osd("mute-toggle");   // the speaker half: the same path right click takes
     return true;
   }
   if (e->button == 1 && kind_ != Kind::Battery && kind_ != Kind::Temp) {

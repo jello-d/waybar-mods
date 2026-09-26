@@ -33,6 +33,11 @@ namespace waybar::modules::hw {
 // peripheral wants opposite actions in the two directions. The slots are named
 // for plugged_, the state they test; see batt_hook for why not "ac"/"battery".
 //
+// The volume knob carries two MUTE gestures: right click mutes the speaker
+// alone, middle click mutes the speaker and the mic together (see on_press).
+// The hover popup therefore reports both devices, since the ring itself draws
+// only the speaker and a mic muted from here would otherwise be unreadable.
+//
 // Data is read without a poll-driven fork: volume comes from libpulse
 // (util::AudioBackend, event-driven); brightness and battery are tiny /sys
 // reads on a slow timer (plus an immediate re-read after a scroll). The numeric
@@ -72,7 +77,9 @@ class Gauge final : public waybar::AModule {
 
   // live state (level normalised to 0..1)
   double level_ = 0.0;
-  bool muted_ = false;                         // volume
+  bool muted_ = false;                         // volume: the speaker (sink)
+  double mic_level_ = 0.0;                     // volume: the mic (source),
+  bool mic_muted_ = false;                     // middle-clickable, so tracked
   bool charging_ = false, plugged_ = false;    // battery
   std::string status_;
   double health_ = 1.0;         // battery wear (energy_full / design)
