@@ -14,6 +14,22 @@ namespace wfi = waybar::wf;
 
 static constexpr double kPi = 3.14159265358979323846;
 
+// The UNLIT cell: opaque, and deliberately a MID slate rather than a dark one.
+// The bar is translucent, so the colour it effectively shows moves with the
+// wallpaper behind it: a dark fill would vanish into the bar over a dark
+// wallpaper, and a light one would compete with the lit cell. Sitting between
+// the two keeps the grid legible in BOTH directions, whatever is behind. Tinted
+// toward the bar's purple family so it belongs to the same chrome. One place to
+// tune if the balance ever needs adjusting.
+//
+// The value was chosen by RENDERING candidates over both a dark and a light
+// wallpaper rather than by eye in the abstract, because the light case is the
+// binding one: the bar lightens with the wallpaper behind it, so a tone that
+// looks fine over a dark desktop can slide into the bar over a light one. 0.34
+// nearly merged there and 0.30 was marginal; 0.22 bought little over 0.26 while
+// dulling the dark case. Re-render before changing it.
+static constexpr double kOffR = 0.26, kOffG = 0.24, kOffB = 0.31;
+
 Grid::Grid(const std::string& id, const waybar::Bar& bar,
            const Json::Value& config)
     : AModule(config, "wfgrid", id, /*enable_click=*/false,
@@ -284,28 +300,26 @@ bool Grid::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     cr->close_path();
   };
 
-  const double lw = std::max(1.0, std::floor(ui_));
+  // Every cell is an OPAQUE fill and only the GAPS carry alpha. This is the
+  // whole contrast story, and the reason the first version washed out: the
+  // bar's background is itself semi-transparent (0.74 over the wallpaper), so
+  // anything drawn at low alpha composites against whatever is BEHIND the bar,
+  // not against the bar. The old thin outline and its faint wash disappeared
+  // over a light or busy wallpaper while the near-opaque lit cell survived.
+  // Opaque fills cannot wash out at all, and leaving the gaps transparent is
+  // what still reads as separate floating displays.
   for (int cy = 0; cy < grid_h_; cy++) {
     for (int cx = 0; cx < grid_w_; cx++) {
       const double x = l.x0 + cx * (l.cell_w + gap_);
       const double y = l.y0 + cy * (l.cell_h + gap_);
       const bool here = (cx == ws_x_ && cy == ws_y_);
-
-      // Inactive cells are a thin outline over a barely-there wash, so the grid
-      // reads as a shape at a glance without competing with the lit cell. Half
-      // a line width inset keeps the stroke inside its own cell, else adjacent
-      // strokes straddle the gap and look like a doubled line.
-      rounded(x + lw / 2.0, y + lw / 2.0, l.cell_w - lw, l.cell_h - lw, rad);
+      rounded(x, y, l.cell_w, l.cell_h, rad);
       if (here) {
-        cr->set_source_rgba(r, g, b, 0.92);
-        cr->fill();
+        cr->set_source_rgba(r, g, b, 1.0);        // lit: the themed fg
       } else {
-        cr->set_source_rgba(r, g, b, 0.10);
-        cr->fill_preserve();
-        cr->set_line_width(lw);
-        cr->set_source_rgba(r, g, b, 0.45);
-        cr->stroke();
+        cr->set_source_rgba(kOffR, kOffG, kOffB, 1.0);
       }
+      cr->fill();
     }
   }
   return true;
