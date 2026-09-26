@@ -14,21 +14,26 @@ namespace wfi = waybar::wf;
 
 static constexpr double kPi = 3.14159265358979323846;
 
-// The UNLIT cell: opaque, and deliberately a MID slate rather than a dark one.
-// The bar is translucent, so the colour it effectively shows moves with the
-// wallpaper behind it: a dark fill would vanish into the bar over a dark
-// wallpaper, and a light one would compete with the lit cell. Sitting between
-// the two keeps the grid legible in BOTH directions, whatever is behind. Tinted
-// toward the bar's purple family so it belongs to the same chrome. One place to
-// tune if the balance ever needs adjusting.
+// A cell is a DARK opaque fill inside a LIGHT opaque border. The border is what
+// makes the grid countable, and it has to be light because the thing behind it
+// is not: the bar is translucent, so what it shows moves with the wallpaper,
+// and no single dark or mid tone can stay clear of it. A high-luminance edge
+// beats the bar from above in every case instead of trying to sit beside it.
 //
-// The value was chosen by RENDERING candidates over both a dark and a light
-// wallpaper rather than by eye in the abstract, because the light case is the
-// binding one: the bar lightens with the wallpaper behind it, so a tone that
-// looks fine over a dark desktop can slide into the bar over a light one. 0.34
-// nearly merged there and 0.30 was marginal; 0.22 bought little over 0.26 while
-// dulling the dark case. Re-render before changing it.
-static constexpr double kOffR = 0.26, kOffG = 0.24, kOffB = 0.31;
+// This replaced a mid-slate fill with NO border, which measured a contrast
+// ratio of 1.09 against the bar on a real desktop: the cells were there but
+// effectively invisible, so you could not count them or see where the lit one
+// sat among them. The fill is darker here than that slate on purpose, to give
+// the border something to read against and to keep the lit cell dominant.
+//
+// Measured on the real screenshot, not guessed: edge vs bar 2.9, edge vs fill
+// 4.4, lit vs fill 5.6. A BRIGHTER edge was rendered too and rejected, since
+// near-white borders start competing with the lit cell and cost you "which one
+// am I on" to buy legibility you already had. Re-render over a real capture
+// before retuning: a synthetic backdrop misses the midtone case that broke this
+// the first time.
+static constexpr double kOffR = 0.13, kOffG = 0.12, kOffB = 0.17;
+static constexpr double kEdgeR = 0.72, kEdgeG = 0.71, kEdgeB = 0.78;
 
 Grid::Grid(const std::string& id, const waybar::Bar& bar,
            const Json::Value& config)
@@ -300,26 +305,33 @@ bool Grid::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     cr->close_path();
   };
 
-  // Every cell is an OPAQUE fill and only the GAPS carry alpha. This is the
-  // whole contrast story, and the reason the first version washed out: the
-  // bar's background is itself semi-transparent (0.74 over the wallpaper), so
-  // anything drawn at low alpha composites against whatever is BEHIND the bar,
-  // not against the bar. The old thin outline and its faint wash disappeared
-  // over a light or busy wallpaper while the near-opaque lit cell survived.
-  // Opaque fills cannot wash out at all, and leaving the gaps transparent is
-  // what still reads as separate floating displays.
+  // Everything drawn here is OPAQUE, and only the GAPS carry alpha. That is
+  // deliberate and it is what the first two versions got wrong: the bar's own
+  // background is semi-transparent (0.74 over the wallpaper), so anything at
+  // low alpha composites against the WALLPAPER rather than the bar and washes
+  // out over a busy desktop. Opaque marks cannot. The transparent gaps are what
+  // still read as separate floating displays.
+  //
+  // Each cell is a dark fill inside a light border, and the border is the part
+  // that carries the grid: it is what lets you count the cells and see where
+  // the lit one sits among them. Stroke inset by half a line width so the edge
+  // stays inside its own cell and the gaps stay the width they claim to be.
+  const double lw = std::max(1.0, std::floor(ui_));
   for (int cy = 0; cy < grid_h_; cy++) {
     for (int cx = 0; cx < grid_w_; cx++) {
       const double x = l.x0 + cx * (l.cell_w + gap_);
       const double y = l.y0 + cy * (l.cell_h + gap_);
       const bool here = (cx == ws_x_ && cy == ws_y_);
-      rounded(x, y, l.cell_w, l.cell_h, rad);
+      rounded(x + lw / 2.0, y + lw / 2.0, l.cell_w - lw, l.cell_h - lw, rad);
       if (here) {
         cr->set_source_rgba(r, g, b, 1.0);        // lit: the themed fg
       } else {
         cr->set_source_rgba(kOffR, kOffG, kOffB, 1.0);
       }
-      cr->fill();
+      cr->fill_preserve();
+      cr->set_line_width(lw);
+      cr->set_source_rgba(kEdgeR, kEdgeG, kEdgeB, 1.0);
+      cr->stroke();
     }
   }
   return true;
