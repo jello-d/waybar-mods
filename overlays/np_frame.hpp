@@ -2,9 +2,9 @@
 
 // np_frame.hpp - the C++ half of the now-playing shared-memory contract.
 //
-// MIRRORS libexec/npframe.py in the now-playing package; the authority is that
-// package's docs/contract.md. These two files are INDEPENDENT implementations
-// of ONE layout, so every constant below must match its counterpart exactly. A
+// MIRRORS libexec/npframe_lib.py in the now-playing package; the authority is
+// that package's docs/contract.md. These two files are INDEPENDENT
+// implementations of ONE layout, so every constant must match exactly. A
 // change on either side alone is a silent misparse, which is precisely what
 // the layout version exists to turn into a loud failure instead.
 //

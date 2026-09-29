@@ -95,19 +95,37 @@ out=$(XDG_RUNTIME_DIR="$T/empty" "$T/t" 2>&1) \
 echo "$out" | grep -q '^read=absent' || fail "absent frame misreported: $out"
 
 # --- cross-language roundtrip ---------------------------------------------
+# Locate the PACKAGE and the frame MODULE separately, because conflating them
+# made this test lie. It used to probe for one filename, so when the package
+# renamed it (npframe.py -> npframe_lib.py, 2026-09-29, for the _lib classifier
+# convention) the probe found nothing and PASSED with "offsets only" -- silently
+# dropping the roundtrip that is the ONLY guard against this header and that
+# writer disagreeing about the layout, while still reporting green.
+#
+# So: a package that is ABSENT is a legitimate skip. A package that is PRESENT
+# but whose module we cannot find is DRIFT, and drift fails loud. Both names are
+# accepted so neither repo has to land first.
 NP=
+NPMOD=
 for _c in "$HOME/src/now-playing" "$HOME/.cache/tackup/pkgs/now-playing"; do
-  [ -f "$_c/libexec/npframe.py" ] && NP=$_c && break
+  [ -d "$_c/libexec" ] || continue
+  NP=$_c
+  for _m in npframe_lib npframe; do
+    [ -f "$_c/libexec/$_m.py" ] && NPMOD=$_m && break
+  done
+  break
 done
 [ -n "$NP" ] || pass "offsets only; now-playing package not on this box"
 [ -n "$NP" ] || exit 0
+[ -n "$NPMOD" ] || fail "now-playing at $NP has no frame module (tried
+  libexec/npframe_lib.py, libexec/npframe.py); layout cannot be cross-checked"
 command -v python3 >/dev/null 2>&1 || pass "offsets only; python3 absent"
 command -v python3 >/dev/null 2>&1 || exit 0
 
-XDG_RUNTIME_DIR=$T python3 - "$NP" <<'EOF' || fail "writer failed"
-import sys
+XDG_RUNTIME_DIR=$T python3 - "$NP" "$NPMOD" <<'EOF' || fail "writer failed"
+import importlib, sys
 sys.path.insert(0, sys.argv[1] + "/libexec")
-import npframe as F
+F = importlib.import_module(sys.argv[2])
 F.Writer().publish(status=F.STATUS_PAUSED, source=F.SOURCE_CAST,
                    position=12.5, length=321.25, rate=1.5,
                    caps=F.CAP_PAUSE | F.CAP_PREV, track_id=77,
