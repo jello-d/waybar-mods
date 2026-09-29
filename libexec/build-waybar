@@ -83,7 +83,6 @@ cp "$OV/nvml.hpp"          "$SRC/include/nvml.hpp"
 # that package's docs/contract.md). Header-only and dependency-free, so
 # media/card reads the daemon's frame without waybar linking anything new.
 cp "$OV/np_frame.hpp"      "$SRC/include/np_frame.hpp"
-cp "$OV/spectrum.hpp"      "$SRC/include/spectrum.hpp"
 # wf_ipc.hpp is wayfire's IPC transport (framing + request/response + the event
 # stream), shared by the wayfire/* modules so a second one does not carry a
 # second copy of the wire format.
@@ -107,8 +106,6 @@ git -C "$SRC" apply "$PAT/tray-sort.patch"
 # re-fetch SNI properties when the proxy cache races empty, so Chromium/Electron
 # tray icons (Slack, ...) are not dropped forever
 git -C "$SRC" apply "$PAT/sni-refetch.patch"
-# link libpulse-simple for the media card's local audio spectrum
-git -C "$SRC" apply "$PAT/spectrum-pulse.patch"
 
 # --- build + install --------------------------------------------------------
 # cava is retired here (our sysmon/graph module replaced it). Its meson feature

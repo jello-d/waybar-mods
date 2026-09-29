@@ -32,7 +32,6 @@ Behaviour patches (in `patches/`):
 - `tray-sort` — a stable, config-driven SNI tray order.
 - `sni-refetch` — re-fetch SNI properties when the proxy cache races empty, so
   Chromium/Electron tray icons are not dropped.
-- `spectrum-pulse` — link libpulse-simple for the media card's audio spectrum.
 
 ## Use
 

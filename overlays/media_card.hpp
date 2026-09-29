@@ -12,7 +12,6 @@
 #include "AModule.hpp"
 #include "bar.hpp"
 #include "np_frame.hpp"
-#include "spectrum.hpp"
 
 namespace waybar::modules::media {
 
@@ -93,18 +92,18 @@ class Card final : public waybar::AModule {
       next_x_ = 0, next_w_ = 0;
 
   // ---- audio spectrum (Winamp-style analyzer) -------------------------------
-  // The bands come from the FRAME when the daemon publishes them: the card is
-  // not told, and must not care, whether they were derived from a local sink
-  // monitor or from a cast-side reconstruction.
+  // The bands come from the FRAME, and from nowhere else. The card is not told,
+  // and must not care, whether they were derived from a local sink monitor or a
+  // cast-side reconstruction.
   //
-  // TRANSITIONAL: until the daemon owns the analyser, a local capture here
-  // fills in when the frame carries no bands. That fallback (and spectrum.hpp,
-  // and every spectrum-* DSP key in this module's config) is scheduled for
-  // deletion; do not build on it. Signal config belongs with the producer, and
-  // only the LOOK keys below stay here.
+  // The TRANSITIONAL local capture is GONE, along with spectrum.hpp and every
+  // spectrum-* DSP key: the analyser lives in the daemon now. Do NOT add one
+  // back. An empty band array is the daemon saying it has no spectrum to
+  // give (no local PCM while casting), and substituting our own capture there
+  // would draw whatever is playing on THIS box against a cast track. Only the
+  // LOOK keys below belong on this side.
   bool spectrum_on_ = false;
-  std::unique_ptr<Spectrum> spec_;
-  std::vector<float> levels_;   // current band levels 0..1 (from spec_)
+  std::vector<float> levels_;   // current band levels 0..1 (from the frame)
   std::vector<float> caps_;     // peak-hold cap height per band 0..1
   std::vector<float> cap_vel_;  // cap fall velocity (units/sec)
   std::vector<double> cap_hold_;// remaining hold time per band (sec)

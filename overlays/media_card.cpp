@@ -8,6 +8,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>   // std::fill (clearing the band levels)
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -54,27 +55,16 @@ Card::Card(const std::string& id, const waybar::Bar& bar,
   if (bar_.config["height"].isInt())
     ui_scale_ = bar_.config["height"].asInt() / 48.0;
 
-  // Audio spectrum (opt-in). DSP + render tunables are config, so gain/decay/
-  // look can be dialed without a rebuild (a `wb restart` re-reads them).
+  // Audio spectrum (opt-in). Only the LOOK is configured here now: the BANDS
+  // come from the daemon's frame, so every SIGNAL key (bands, fft, gain,
+  // floor-db, tilt, attack, decay, fmin, fmax, active-rms) moved to the
+  // producer, where the analyser lives. Look keys still take effect on a
+  // `wb restart`, with no rebuild.
   spectrum_on_ = config_["spectrum"].isBool() && config_["spectrum"].asBool();
   if (spectrum_on_) {
-    Spectrum::Config sc;
-    auto cfgi = [&](const char* k, int d) {
-      return config_[k].isInt() ? config_[k].asInt() : d;
-    };
     auto cfgd = [&](const char* k, double d) {
       return config_[k].isNumeric() ? config_[k].asDouble() : d;
     };
-    sc.bands = cfgi("spectrum-bands", sc.bands);
-    sc.fft = cfgi("spectrum-fft", sc.fft);
-    sc.gain = cfgd("spectrum-gain", sc.gain);
-    sc.floor_db = cfgd("spectrum-floor-db", sc.floor_db);
-    sc.tilt = cfgd("spectrum-tilt", sc.tilt);
-    sc.attack = cfgd("spectrum-attack", sc.attack);
-    sc.decay = cfgd("spectrum-decay", sc.decay);
-    sc.fmin = cfgd("spectrum-fmin", sc.fmin);
-    sc.fmax = cfgd("spectrum-fmax", sc.fmax);
-    sc.active_rms = cfgd("spectrum-active-rms", sc.active_rms);
     cap_hold_s_ = cfgd("spectrum-cap-hold", cap_hold_s_);
     cap_gravity_ = cfgd("spectrum-cap-gravity", cap_gravity_);
     dot_h_ = cfgd("spectrum-dot-height", dot_h_);
@@ -82,11 +72,9 @@ Card::Card(const std::string& id, const waybar::Bar& bar,
     spec_alpha_ = cfgd("spectrum-alpha", spec_alpha_);
     text_scrim_ = cfgd("spectrum-text-scrim", text_scrim_);
     text_outline_ = cfgd("spectrum-text-outline", text_outline_);
-    levels_.assign(sc.bands, 0.0f);
-    caps_.assign(sc.bands, 0.0f);
-    cap_vel_.assign(sc.bands, 0.0f);
-    cap_hold_.assign(sc.bands, 0.0);
-    spec_ = std::make_unique<Spectrum>(sc);
+    // levels_ and the cap arrays size themselves from the frame's own
+    // band_count on the first sample: how MANY bands there are is the
+    // daemon's decision, not a number this side gets to assume.
   }
 
   // The frame's path is FIXED by the contract, so there is nothing to point at
@@ -659,12 +647,20 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
 // ---- spectrum: peak-hold animation + dithered render ----------------------
 bool Card::updateSpectrum() {
   if (!spectrum_on_) return false;
-  if (!f_.bands.empty()) {
-    levels_ = f_.bands;        // the daemon's bands: the contract's source
-  } else if (spec_) {
-    spec_->read(levels_);      // TRANSITIONAL local capture; see the header
+  // THE DAEMON'S BANDS ARE THE ONLY SOURCE. There is deliberately no local
+  // capture fallback any more. While a cast is the source there is no local
+  // PCM, so capturing this box's sink monitor would draw whatever happens to be
+  // playing HERE against a cast track -- and the daemon publishes an EMPTY band
+  // array precisely to say it has no spectrum to give. Answering that by
+  // substituting our own signal would override an honest answer with a wrong
+  // one, and would flicker between two DSP implementations mid-track.
+  if (f_.bands.empty()) {
+    if (levels_.empty()) return false;
+    // Fade out rather than freeze: zero the levels and let the cap physics
+    // below settle, so the analyzer clears instead of holding its last picture.
+    std::fill(levels_.begin(), levels_.end(), 0.0f);
   } else {
-    return false;
+    levels_ = f_.bands;
   }
   const double now = now_mono();
   double dt = spec_last_ > 0 ? now - spec_last_ : 0.0;
