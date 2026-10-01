@@ -62,17 +62,22 @@ _build() {   # <prefix>
     sh "$_root/libexec/build-waybar" "$1"
 }
 
-_link_man() {   # cheap, idempotent; runs regardless of the build gate
+# COPY the man page, never symlink it: a deployed link into this clone
+# (~/.cache/tackup/pkgs/waybar-mods) dangles when the clone is re-cloned or
+# wiped, the place-not-link rule. --remove-destination replaces a prior symlink
+# with a real file rather than writing THROUGH it into the clone. Re-copies on
+# every run (idempotent), so a man edit propagates on the next install.
+_place_man() {   # cheap, idempotent; runs regardless of the build gate
   _man=${XDG_DATA_HOME:-$PREFIX/share}/man
   for _m in "$_root"/man/man*/*.[0-9]; do
     [ -e "$_m" ] || continue
     _d=$_man/$(basename "$(dirname "$_m")")
-    mkdir -p "$_d"; ln -sfn "$_m" "$_d/$(basename "$_m")"
+    mkdir -p "$_d"; cp --remove-destination "$_m" "$_d/$(basename "$_m")"
   done
 }
 
 do_install() {
-  _link_man
+  _place_man
   _w=$(_want)
   if [ -x "$WAYBAR" ] && [ -r "$STAMP" ] \
      && [ "$(cat "$STAMP" 2>/dev/null)" = "$_w" ]; then
@@ -98,8 +103,13 @@ do_uninstall() {
   if [ -d "$_bdir" ]; then
     ninja -C "$_bdir" uninstall >/dev/null 2>&1 || true
   fi
+  _man=${XDG_DATA_HOME:-$PREFIX/share}/man
+  for _m in "$_root"/man/man*/*.[0-9]; do
+    [ -e "$_m" ] || continue
+    rm -f "$_man/$(basename "$(dirname "$_m")")/$(basename "$_m")"
+  done
   rm -f "$WAYBAR" "$STAMP"
-  echo "$PKG: removed installed waybar + stamp"
+  echo "$PKG: removed installed waybar + man + stamp"
 }
 
 do_check() {
@@ -122,6 +132,17 @@ do_check() {
   else
     bad "installed waybar STALE vs source (run setup.sh install)"
   fi
+  # The man page must be a COPY, never a symlink into this clone (place rule).
+  _man=${XDG_DATA_HOME:-$PREFIX/share}/man
+  _mok=1
+  for _m in "$_root"/man/man*/*.[0-9]; do
+    [ -e "$_m" ] || continue
+    _dst=$_man/$(basename "$(dirname "$_m")")/$(basename "$_m")
+    if [ -f "$_dst" ] && [ ! -L "$_dst" ]; then :
+    else _mok=0; fi
+  done
+  [ "$_mok" = 1 ] && ok "man page is a copy, not a clone link" \
+    || bad "man page missing or still a symlink (run setup.sh install)"
 }
 
 _U="usage: setup.sh [install|verify|check|uninstall|test|version]"
