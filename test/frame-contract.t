@@ -105,26 +105,38 @@ echo "$out" | grep -q '^read=absent' || fail "absent frame misreported: $out"
 # So: a package that is ABSENT is a legitimate skip. A package that is PRESENT
 # but whose module we cannot find is DRIFT, and drift fails loud. Both names are
 # accepted so neither repo has to land first.
+# THE DIRECTORY MOVED TOO, which is the same lesson one level up: the package
+# standardised on an FHS tree and the frame module went libexec/ -> lib/
+# (LOADED, never executed, so lib/ is where it belongs). This probe searched
+# only libexec/ and so failed loud on a perfectly healthy pair, which is the
+# right direction to fail but still a stale SELECTOR. Search both, newest
+# layout first, and carry the directory forward rather than hardcoding it
+# again downstream.
 NP=
 NPMOD=
+NPDIR=
 for _c in "$HOME/src/now-playing" "$HOME/.cache/tackup/pkgs/now-playing"; do
-  [ -d "$_c/libexec" ] || continue
+  [ -d "$_c/lib" ] || [ -d "$_c/libexec" ] || continue
   NP=$_c
-  for _m in npframe_lib npframe; do
-    [ -f "$_c/libexec/$_m.py" ] && NPMOD=$_m && break
+  for _d in lib libexec; do
+    for _m in npframe_lib npframe; do
+      if [ -f "$_c/$_d/$_m.py" ]; then NPMOD=$_m; NPDIR=$_d; break; fi
+    done
+    [ -n "$NPMOD" ] && break
   done
   break
 done
 [ -n "$NP" ] || pass "offsets only; now-playing package not on this box"
 [ -n "$NP" ] || exit 0
 [ -n "$NPMOD" ] || fail "now-playing at $NP has no frame module (tried
-  libexec/npframe_lib.py, libexec/npframe.py); layout cannot be cross-checked"
+  {lib,libexec}/{npframe_lib,npframe}.py); layout cannot be cross-checked"
 command -v python3 >/dev/null 2>&1 || pass "offsets only; python3 absent"
 command -v python3 >/dev/null 2>&1 || exit 0
 
-XDG_RUNTIME_DIR=$T python3 - "$NP" "$NPMOD" <<'EOF' || fail "writer failed"
+XDG_RUNTIME_DIR=$T python3 - "$NP/$NPDIR" "$NPMOD" <<'EOF' \
+  || fail "writer failed"
 import importlib, sys
-sys.path.insert(0, sys.argv[1] + "/libexec")
+sys.path.insert(0, sys.argv[1])
 F = importlib.import_module(sys.argv[2])
 F.Writer().publish(status=F.STATUS_PAUSED, source=F.SOURCE_CAST,
                    position=12.5, length=321.25, rate=1.5,
