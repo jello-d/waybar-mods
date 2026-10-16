@@ -464,7 +464,13 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
   const double tw = tright - tx;
   if (tw > 24) {
     const double row1 = 2, row2 = h * 0.48;
-    const double v = 42.0, tlin = 3.5, tend = 1.0;   // slower lead, quick tail
+    // v is READING speed, used when there is enough overflow to read. tmin is
+    // the floor on how long a travel may take: below it the motion is too
+    // brief to register as motion at all (measured 2026-10-14 on an 11px
+    // album overflow -- 0.26s of travel, 1 of 170 sampled frames caught it
+    // mid-move, and the 1-frame rewind was the same size as the scroll). trew
+    // is the eased rewind that replaces the old single-frame snap.
+    const double v = 42.0, tend = 1.0, tmin = 2.0, trew = 0.35;
     const bool hasAlbum = !idle && !f_.album.empty();
 
     // Analyzer confined to the progress-bar column [tx, tx+tw] -- never under
@@ -541,17 +547,40 @@ bool Card::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
 
     // ONE shared scroll cycle, sized by the longer of title/album so they reset
     // together (the shorter reaches its tail and waits out the cycle).
-    const double tscr_max =
+    //
+    // THREE MODES, by how long the travel WOULD take at reading speed, because
+    // the question is whether the motion lasts long enough to read AS motion;
+    // a pixel threshold would have to be retuned whenever v is:
+    //   raw == 0      static, nothing overflows
+    //   raw >= tmin   long: scroll linearly at v, exactly as before
+    //   raw <  tmin   barely over: stretch the travel to tmin and ease it, so
+    //                 an 11px overflow drifts at ~5px/s instead of twitching
+    // Every mode now rewinds over trew instead of teleporting in one frame.
+    const double raw =
         std::max(std::max(0.0, ov_title), std::max(0.0, ov_alb)) / v;
-    const double cyc = tlin + tscr_max + tend;
+    const bool barely = raw > 0.0 && raw < tmin;
+    // A shorter lead-in for the barely-over case: the text is readable from
+    // the first frame there, so a 3.5s linger just makes the cycle feel dead.
+    const double tlin = barely ? 2.5 : 3.5;
+    const double tscr_max = (raw > 0.0) ? std::max(raw, tmin) : 0.0;
+    const double cyc = tlin + tscr_max + tend + trew;
     double ph = std::fmod(now_mono() - marquee_t0_, cyc);
     if (ph < 0) ph += cyc;
+    auto ease = [](double u) { return u * u * (3.0 - 2.0 * u); };
     auto offOf = [&](double ov) -> double {
       if (ov <= 2 || !f_.playing()) return 0.0;
-      const double tscr = ov / v;
+      const double raw_i = ov / v;
+      const double tscr = std::max(raw_i, tmin);
       if (ph < tlin) return 0.0;
-      if (ph < tlin + tscr) return (ph - tlin) * v;
-      return ov;   // at its tail; hold until the cycle resets
+      if (ph < tlin + tscr) {
+        // Linear for a long scroll: easing a 7s travel would make the text
+        // race through the middle, which is the half you actually read.
+        const double u = (ph - tlin) / tscr;
+        return ov * (raw_i < tmin ? ease(u) : u);
+      }
+      if (ph < tlin + tscr_max + tend) return ov;   // tail; wait for the cycle
+      const double u = std::min(1.0, (ph - (tlin + tscr_max + tend)) / trew);
+      return ov * (1.0 - ease(u));
     };
 
     // draw a (maybe scrolling) line clipped to its column, soft edge fades in
