@@ -1,0 +1,53 @@
+diff --git a/protocol/meson.build b/protocol/meson.build
+index b16113b2..0f1be8b9 100644
+--- a/protocol/meson.build
++++ b/protocol/meson.build
+@@ -25,6 +25,7 @@ client_protocols = [
+ 	[wl_protocol_dir, 'stable/xdg-shell/xdg-shell.xml'],
+ 	[wl_protocol_dir, 'unstable/xdg-output/xdg-output-unstable-v1.xml'],
+ 	[wl_protocol_dir, 'unstable/idle-inhibit/idle-inhibit-unstable-v1.xml'],
++	[wl_protocol_dir, 'staging/xdg-activation/xdg-activation-v1.xml'],
+ 	['wlr-foreign-toplevel-management-unstable-v1.xml'],
+ 	['river-status-unstable-v1.xml'],
+ 	['river-control-unstable-v1.xml'],
+diff --git a/src/modules/sni/item.cpp b/src/modules/sni/item.cpp
+index bc699b9c..57f7b4a4 100644
+--- a/src/modules/sni/item.cpp
++++ b/src/modules/sni/item.cpp
+@@ -9,6 +9,7 @@
+ #include <fstream>
+ #include <map>
+ 
++#include "activation_token.hpp"
+ #include "bus_menu.hpp"
+ #include "gdk/gdk.h"
+ #include "modules/sni/icon_manager.hpp"
+@@ -73,6 +74,8 @@ Item::Item(const std::string& bn, const std::string& op, const Json::Value& conf
+ 
+   auto interface = Glib::wrap(sn_item_interface_info(), true);
+   if (on_bus_) {
++    // Start recording press serials now, so the first click can raise.
++    activation::Tokens::instance();
+     Gio::DBus::Proxy::create(conn, bus_name, object_path, SNI_INTERFACE_NAME,
+                              sigc::mem_fun(*this, &Item::proxyReady), cancellable_, interface);
+     return;
+@@ -557,6 +560,19 @@ bool Item::handleClick(GdkEventButton* const& ev) {
+       return true;
+     }
+   } else if (ev->button == 1) {
++    if (on_bus_) {
++      // An app on another bus is another session's, with no input serial of
++      // its own, so the compositor would refuse to let it raise itself. Hand
++      // it a token from this click first; same connection, same destination,
++      // so it arrives before Activate. An item without the method just
++      // answers an error, which nobody waits for.
++      auto token = activation::Tokens::instance().mint(event_box.get_window()->gobj());
++      if (!token.empty()) {
++        proxy_->call("ProvideXdgActivationToken",
++                     Glib::VariantContainerBase::create_tuple(
++                         {Glib::Variant<Glib::ustring>::create(token)}));
++      }
++    }
+     proxy_->call("Activate", parameters);
+     return true;
+   } else if (ev->button == 2) {

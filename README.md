@@ -39,6 +39,10 @@ Behaviour patches (in `patches/`):
 - `tray-bus-menu`: menus for that tray, from a small dbusmenu client on the
   tray's own connection (`overlays/bus_menu.hpp`), since libdbusmenu only
   reaches the session bus.
+- `tray-bus-activate`: click to raise for that tray. The bar mints an
+  xdg-activation token from the click (`overlays/activation_token.hpp`) and
+  hands it to the item (SNI `ProvideXdgActivationToken`) before `Activate`,
+  since an app in another session has no input serial of its own.
 
 ## Use
 

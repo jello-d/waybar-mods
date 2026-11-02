@@ -91,6 +91,10 @@ cp "$OV/wf_ipc.hpp"        "$SRC/include/wf_ipc.hpp"
 # for the menus of a tray on another bus (libdbusmenu reaches only the session
 # bus). Used by tray-bus-menu.patch.
 cp "$OV/bus_menu.hpp"      "$SRC/include/bus_menu.hpp"
+# activation_token.hpp mints an xdg-activation token from a click on the bar,
+# so a tray icon on another bus can raise its app's window. Used by
+# tray-bus-activate.patch.
+cp "$OV/activation_token.hpp" "$SRC/include/activation_token.hpp"
 
 # --- restore tracked files to pristine, then apply our patches --------------
 # A reused checkout still carries a prior run's applied patches as local edits;
@@ -115,6 +119,8 @@ git -C "$SRC" apply "$PAT/sni-refetch.patch"
 git -C "$SRC" apply "$PAT/tray-bus.patch"
 # menus for that tray, built by bus_menu.hpp on the tray's own connection
 git -C "$SRC" apply "$PAT/tray-bus-menu.patch"
+# click to raise for that tray: a token from the click, handed to the item
+git -C "$SRC" apply "$PAT/tray-bus-activate.patch"
 
 # --- build + install --------------------------------------------------------
 # cava is retired here (our sysmon/graph module replaced it). Its meson feature
