@@ -32,6 +32,10 @@ Behaviour patches (in `patches/`):
 - `tray-sort` — a stable, config-driven SNI tray order.
 - `sni-refetch` — re-fetch SNI properties when the proxy cache races empty, so
   Chromium/Electron tray icons are not dropped.
+- `tray-bus`: a tray hosting the items of another D-Bus address (`"bus"`), so
+  a second tray can show a separate session's icons (another user's apps,
+  through a filtering proxy) apart from the session tray. Optional `"label"`;
+  the tray carries the `bus` class for styling. No menus on it yet.
 
 ## Use
 

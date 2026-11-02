@@ -106,6 +106,9 @@ git -C "$SRC" apply "$PAT/tray-sort.patch"
 # re-fetch SNI properties when the proxy cache races empty, so Chromium/Electron
 # tray icons (Slack, ...) are not dropped forever
 git -C "$SRC" apply "$PAT/sni-refetch.patch"
+# a tray on another D-Bus address (`"bus"`): an enclave's items, in a tray of
+# their own beside the session one
+git -C "$SRC" apply "$PAT/tray-bus.patch"
 
 # --- build + install --------------------------------------------------------
 # cava is retired here (our sysmon/graph module replaced it). Its meson feature

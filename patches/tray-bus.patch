@@ -1,0 +1,489 @@
+diff --git a/include/modules/sni/host.hpp b/include/modules/sni/host.hpp
+index 4f632b0f..359dede5 100644
+--- a/include/modules/sni/host.hpp
++++ b/include/modules/sni/host.hpp
+@@ -9,6 +9,7 @@
+ 
+ #include "bar.hpp"
+ #include "modules/sni/item.hpp"
++#include "modules/sni/watcher.hpp"
+ 
+ namespace waybar::modules::SNI {
+ 
+@@ -16,7 +17,7 @@ class Host {
+  public:
+   Host(const std::size_t id, const Json::Value&, const Bar&,
+        const std::function<void(std::unique_ptr<Item>&)>&,
+-       const std::function<void(std::unique_ptr<Item>&)>&);
++       const std::function<void(std::unique_ptr<Item>&)>&, const Watcher::singleton&);
+   ~Host();
+ 
+  private:
+@@ -31,13 +32,17 @@ class Host {
+ 
+   std::tuple<std::string, std::string> getBusNameAndObjectPath(const std::string);
+   void addRegisteredItem(std::string service);
++  void onConnection(const Watcher::ConnectionRef&);
+   void dropItems();
+ 
+   std::vector<std::unique_ptr<Item>> items_;
+   const std::string bus_name_;
+   const std::string object_path_;
+-  std::size_t bus_name_id_;
+-  std::size_t watcher_id_;
++  std::size_t bus_name_id_ = 0;
++  std::size_t watcher_id_ = 0;
++  // Set only for a tray on another bus (see Watcher::getInstance).
++  Watcher::ConnectionRef conn_;
++  sigc::connection conn_changed_;
+   GCancellable* cancellable_ = nullptr;
+   SnWatcher* watcher_ = nullptr;
+   const Json::Value& config_;
+diff --git a/include/modules/sni/item.hpp b/include/modules/sni/item.hpp
+index cf01a255..8b58d8e5 100644
+--- a/include/modules/sni/item.hpp
++++ b/include/modules/sni/item.hpp
+@@ -26,7 +26,10 @@ struct ToolTip {
+ 
+ class Item : public sigc::trackable {
+  public:
+-  Item(const std::string&, const std::string&, const Json::Value&, const Bar&);
++  // conn: the tray's own connection for a tray on another bus ("bus"), or
++  // empty for the session bus.
++  Item(const std::string&, const std::string&, const Json::Value&, const Bar&,
++       const Glib::RefPtr<Gio::DBus::Connection>& conn = {});
+   ~Item();
+ 
+   std::string bus_name;
+@@ -94,6 +97,8 @@ class Item : public sigc::trackable {
+   bool show_passive_ = false;
+ 
+   const Bar& bar_;
++  // True when hosted on a tray's own connection rather than the session bus.
++  const bool on_bus_;
+ 
+   Glib::RefPtr<Gio::DBus::Proxy> proxy_;
+   Glib::RefPtr<Gio::Cancellable> cancellable_;
+diff --git a/include/modules/sni/tray.hpp b/include/modules/sni/tray.hpp
+index d1140bdb..e38cfa53 100644
+--- a/include/modules/sni/tray.hpp
++++ b/include/modules/sni/tray.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <fmt/format.h>
++#include <gtkmm/label.h>
+ 
+ #include <vector>
+ 
+@@ -26,6 +27,9 @@ class Tray : public AModule {
+   static inline std::size_t nb_hosts_ = 0;
+   bool show_passive_ = false;
+   Gtk::Box box_;
++  // Optional "label": a name beside the items, packed with them in outer_.
++  Gtk::Box outer_;
++  Gtk::Label label_;
+   std::vector<Item*> items_;
+   SNI::Watcher::singleton watcher_;
+   SNI::Host host_;
+diff --git a/include/modules/sni/watcher.hpp b/include/modules/sni/watcher.hpp
+index 5cb0f19e..d4bed535 100644
+--- a/include/modules/sni/watcher.hpp
++++ b/include/modules/sni/watcher.hpp
+@@ -3,28 +3,43 @@
+ #include <dbus-status-notifier-watcher.h>
+ #include <giomm.h>
+ #include <glibmm/refptr.h>
++#include <sigc++/trackable.h>
++
++#include <map>
++#include <memory>
++#include <string>
+ 
+ namespace waybar::modules::SNI {
+ 
+-class Watcher {
++class Watcher : public sigc::trackable {
+  private:
+-  Watcher();
++  explicit Watcher(const std::string& address);
+ 
+  public:
+   ~Watcher();
+ 
++  // One watcher per bus, shared by every tray in the process that names it.
++  // An empty address is the session bus (upstream's behaviour); anything else
++  // is a D-Bus address (a tray's "bus" key), hosted on a connection of its own.
+   using singleton = std::shared_ptr<Watcher>;
+-  static singleton getInstance() {
+-    static std::weak_ptr<Watcher> weak;
++  static singleton getInstance(const std::string& address = "") {
++    static std::map<std::string, std::weak_ptr<Watcher>> weak;
+ 
+-    std::shared_ptr<Watcher> strong = weak.lock();
++    std::shared_ptr<Watcher> strong = weak[address].lock();
+     if (!strong) {
+-      strong = std::shared_ptr<Watcher>(new Watcher());
+-      weak = strong;
++      strong = std::shared_ptr<Watcher>(new Watcher(address));
++      weak[address] = strong;
+     }
+     return strong;
+   }
+ 
++  using ConnectionRef = Glib::RefPtr<Gio::DBus::Connection>;
++  // Non-session bus only: emitted with the connection once it is up, and with
++  // an empty one when it is lost (a reconnect then emits the new one).
++  sigc::signal<void, const ConnectionRef&> signal_connection;
++  const ConnectionRef& connection() const { return conn_; }
++  bool onSessionBus() const { return address_.empty(); }
++
+  private:
+   typedef enum { GF_WATCH_TYPE_HOST, GF_WATCH_TYPE_ITEM } GfWatchType;
+ 
+@@ -38,6 +53,10 @@ class Watcher {
+   } GfWatch;
+ 
+   void busAcquired(const Glib::RefPtr<Gio::DBus::Connection> &, Glib::ustring);
++  void connect();
++  void connected(Glib::RefPtr<Gio::AsyncResult>&);
++  void disconnected(bool, const Glib::Error&);
++  bool retry();
+   static gboolean handleRegisterHost(Watcher *, GDBusMethodInvocation *, const gchar *);
+   static gboolean handleRegisterItem(Watcher *, GDBusMethodInvocation *, const gchar *);
+   static GfWatch *gfWatchFind(GSList *list, const gchar *bus_name, const gchar *object_path);
+@@ -47,7 +66,13 @@ class Watcher {
+ 
+   void updateRegisteredItems(SnWatcher *obj);
+ 
+-  uint32_t bus_name_id_;
++  const std::string address_;
++  ConnectionRef conn_;
++  Glib::RefPtr<Gio::Cancellable> cancellable_;
++  sigc::connection retry_;
++  bool connect_failed_ = false;
++  bool signals_connected_ = false;
++  uint32_t bus_name_id_ = 0;
+   GSList *hosts_ = nullptr;
+   GSList *items_ = nullptr;
+   SnWatcher *watcher_ = nullptr;
+diff --git a/src/modules/sni/host.cpp b/src/modules/sni/host.cpp
+index a3639fb1..b5327b57 100644
+--- a/src/modules/sni/host.cpp
++++ b/src/modules/sni/host.cpp
+@@ -8,18 +8,46 @@ namespace waybar::modules::SNI {
+ 
+ Host::Host(const std::size_t id, const Json::Value& config, const Bar& bar,
+            const std::function<void(std::unique_ptr<Item>&)>& on_add,
+-           const std::function<void(std::unique_ptr<Item>&)>& on_remove)
++           const std::function<void(std::unique_ptr<Item>&)>& on_remove,
++           const Watcher::singleton& watcher)
+     : bus_name_("org.kde.StatusNotifierHost-" + std::to_string(getpid()) + "-" +
+                 std::to_string(id)),
+       object_path_("/StatusNotifierHost/" + std::to_string(id)),
+-      bus_name_id_(Gio::DBus::own_name(Gio::DBus::BusType::BUS_TYPE_SESSION, bus_name_,
+-                                       sigc::mem_fun(*this, &Host::busAcquired))),
+       config_(config),
+       bar_(bar),
+       on_add_(on_add),
+-      on_remove_(on_remove) {}
++      on_remove_(on_remove) {
++  if (watcher->onSessionBus()) {
++    bus_name_id_ = Gio::DBus::own_name(Gio::DBus::BusType::BUS_TYPE_SESSION, bus_name_,
++                                       sigc::mem_fun(*this, &Host::busAcquired));
++    return;
++  }
++  // On another bus the host owns NO name. The bridge into an enclave's bus is
++  // a filtering proxy that refuses to let us own one (measured: only the
++  // watcher name is granted), and nothing needs it: the watcher this host
++  // registers with lives in the same process and tracks it by unique name.
++  conn_changed_ = watcher->signal_connection.connect(sigc::mem_fun(*this, &Host::onConnection));
++  if (watcher->connection()) {
++    onConnection(watcher->connection());
++  }
++}
++
++void Host::onConnection(const Watcher::ConnectionRef& conn) {
++  if (conn) {
++    conn_ = conn;
++    busAcquired(conn, bus_name_);
++    return;
++  }
++  if (watcher_id_ > 0) {
++    Gio::DBus::unwatch_name(watcher_id_);
++    watcher_id_ = 0;
++  }
++  nameVanished(conn_, "org.kde.StatusNotifierWatcher");
++  conn_.reset();
++}
+ 
+ Host::~Host() {
++  conn_changed_.disconnect();
+   if (bus_name_id_ > 0) {
+     Gio::DBus::unown_name(bus_name_id_);
+     bus_name_id_ = 0;
+@@ -147,7 +175,15 @@ void Host::addRegisteredItem(std::string service) {
+     return bus_name == item->bus_name && object_path == item->object_path;
+   });
+   if (it == items_.end()) {
+-    items_.emplace_back(new Item(bus_name, object_path, config_, bar_));
++    // A filtering proxy can only let calls through to WELL-KNOWN names, so an
++    // item registered by its unique name (":1.N") could never be called back:
++    // drop it rather than show an icon that does nothing.
++    if (conn_ && bus_name.compare(0, 1, ":") == 0) {
++      spdlog::info("Tray: ignoring {} on {}: registered by unique name", service,
++                   config_["bus"].asString());
++      return;
++    }
++    items_.emplace_back(new Item(bus_name, object_path, config_, bar_, conn_));
+     on_add_(items_.back());
+   }
+ }
+diff --git a/src/modules/sni/item.cpp b/src/modules/sni/item.cpp
+index 13b5a0c3..ffb92975 100644
+--- a/src/modules/sni/item.cpp
++++ b/src/modules/sni/item.cpp
+@@ -37,13 +37,15 @@ namespace waybar::modules::SNI {
+ static const Glib::ustring SNI_INTERFACE_NAME = sn_item_interface_info()->name;
+ static const unsigned UPDATE_DEBOUNCE_TIME = 10;
+ 
+-Item::Item(const std::string& bn, const std::string& op, const Json::Value& config, const Bar& bar)
++Item::Item(const std::string& bn, const std::string& op, const Json::Value& config, const Bar& bar,
++           const Glib::RefPtr<Gio::DBus::Connection>& conn)
+     : bus_name(bn),
+       object_path(op),
+       icon_size(16),
+       effective_icon_size(0),
+       icon_theme(Gtk::IconTheme::create()),
+-      bar_(bar) {
++      bar_(bar),
++      on_bus_(static_cast<bool>(conn)) {
+   if (config["icon-size"].isUInt()) {
+     icon_size = config["icon-size"].asUInt();
+   }
+@@ -69,6 +71,11 @@ Item::Item(const std::string& bn, const std::string& op, const Json::Value& conf
+   cancellable_ = Gio::Cancellable::create();
+ 
+   auto interface = Glib::wrap(sn_item_interface_info(), true);
++  if (on_bus_) {
++    Gio::DBus::Proxy::create(conn, bus_name, object_path, SNI_INTERFACE_NAME,
++                             sigc::mem_fun(*this, &Item::proxyReady), cancellable_, interface);
++    return;
++  }
+   Gio::DBus::Proxy::create_for_bus(Gio::DBus::BusType::BUS_TYPE_SESSION, bus_name, object_path,
+                                    SNI_INTERFACE_NAME, sigc::mem_fun(*this, &Item::proxyReady),
+                                    cancellable_, interface);
+@@ -95,7 +102,8 @@ void Item::onConfigure(GdkEventConfigure* ev) { this->updateImage(); }
+ 
+ void Item::proxyReady(Glib::RefPtr<Gio::AsyncResult>& result) {
+   try {
+-    this->proxy_ = Gio::DBus::Proxy::create_for_bus_finish(result);
++    this->proxy_ = on_bus_ ? Gio::DBus::Proxy::create_finish(result)
++                           : Gio::DBus::Proxy::create_for_bus_finish(result);
+     /* Properties are already cached during object creation */
+     auto cached_properties = this->proxy_->get_cached_property_names();
+     for (const auto& name : cached_properties) {
+@@ -491,7 +499,9 @@ void Item::onMenuDestroyed(Item* self, GObject* old_menu_pointer) {
+ }
+ 
+ void Item::makeMenu() {
+-  if (gtk_menu == nullptr && !menu.empty()) {
++  // libdbusmenu reaches only the session bus (it takes no connection), so on
++  // another bus there is no menu yet and a click falls back to ContextMenu.
++  if (gtk_menu == nullptr && !menu.empty() && !on_bus_) {
+     dbus_menu = dbusmenu_gtkmenu_new(bus_name.data(), menu.data());
+     if (dbus_menu != nullptr) {
+       g_object_ref_sink(G_OBJECT(dbus_menu));
+diff --git a/src/modules/sni/tray.cpp b/src/modules/sni/tray.cpp
+index 5286ed74..f2d5e7ba 100644
+--- a/src/modules/sni/tray.cpp
++++ b/src/modules/sni/tray.cpp
+@@ -13,15 +13,30 @@ namespace waybar::modules::SNI {
+ Tray::Tray(const std::string& id, const Bar& bar, const Json::Value& config)
+     : AModule(config, "tray", id),
+       box_(bar.orientation, 0),
+-      watcher_(SNI::Watcher::getInstance()),
++      outer_(bar.orientation, 0),
++      watcher_(SNI::Watcher::getInstance(config["bus"].isString() ? config["bus"].asString() : "")),
+       host_(nb_hosts_, config, bar, std::bind(&Tray::onAdd, this, std::placeholders::_1),
+-            std::bind(&Tray::onRemove, this, std::placeholders::_1)) {
++            std::bind(&Tray::onRemove, this, std::placeholders::_1), watcher_) {
+   box_.set_name("tray");
+-  event_box_.add(box_);
++  if (config_["label"].isString()) {
++    label_.set_text(config_["label"].asString());
++    label_.set_name("tray-label");
++    outer_.pack_start(label_, false, false);
++    outer_.pack_start(box_, false, false);
++    event_box_.add(outer_);
++  } else {
++    event_box_.add(box_);
++  }
+   if (!id.empty()) {
+     box_.get_style_context()->add_class(id);
+   }
+   box_.get_style_context()->add_class(MODULE_CLASS);
++  // A tray on another bus (an enclave's) is styled apart from the session
++  // tray, so whose icon is whose reads at a glance.
++  if (!watcher_->onSessionBus()) {
++    box_.get_style_context()->add_class("bus");
++    label_.get_style_context()->add_class("bus");
++  }
+   if (config_["spacing"].isUInt()) {
+     box_.set_spacing(config_["spacing"].asUInt());
+   }
+@@ -88,7 +103,10 @@ void Tray::sortItems() {
+ auto Tray::update() -> void {
+   // Show tray only when items are available
+   std::vector<Gtk::Widget*> children = box_.get_children();
+-  if (show_passive_) {
++  if (config_["label"].isString()) {
++    // A labelled tray always shows, so an empty one still says whose it is.
++    event_box_.set_visible(true);
++  } else if (show_passive_) {
+     event_box_.set_visible(!children.empty());
+   } else {
+     event_box_.set_visible(!std::all_of(children.begin(), children.end(), [](Gtk::Widget* child) {
+diff --git a/src/modules/sni/watcher.cpp b/src/modules/sni/watcher.cpp
+index 324bd9f5..dfbb4679 100644
+--- a/src/modules/sni/watcher.cpp
++++ b/src/modules/sni/watcher.cpp
+@@ -6,14 +6,86 @@
+ 
+ using namespace waybar::modules::SNI;
+ 
+-Watcher::Watcher()
+-    : bus_name_id_(Gio::DBus::own_name(Gio::DBus::BusType::BUS_TYPE_SESSION,
+-                                       "org.kde.StatusNotifierWatcher",
+-                                       sigc::mem_fun(*this, &Watcher::busAcquired),
+-                                       Gio::DBus::SlotNameAcquired(), Gio::DBus::SlotNameLost(),
+-                                       Gio::DBus::BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT |
+-                                           Gio::DBus::BUS_NAME_OWNER_FLAGS_REPLACE)),
+-      watcher_(sn_watcher_skeleton_new()) {}
++static const unsigned RECONNECT_SECONDS = 5;
++
++Watcher::Watcher(const std::string& address)
++    : address_(address), watcher_(sn_watcher_skeleton_new()) {
++  if (address_.empty()) {
++    bus_name_id_ =
++        Gio::DBus::own_name(Gio::DBus::BusType::BUS_TYPE_SESSION, "org.kde.StatusNotifierWatcher",
++                            sigc::mem_fun(*this, &Watcher::busAcquired),
++                            Gio::DBus::SlotNameAcquired(), Gio::DBus::SlotNameLost(),
++                            Gio::DBus::BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT |
++                                Gio::DBus::BUS_NAME_OWNER_FLAGS_REPLACE);
++    return;
++  }
++  connect();
++}
++
++// A tray on another bus (a filtering proxy into an enclave's session bus) may
++// find it absent, or lose it, at any time. Neither may take the bar down: the
++// tray stays empty and the watcher retries until the bus is back.
++void Watcher::connect() {
++  cancellable_ = Gio::Cancellable::create();
++  Gio::DBus::Connection::create_for_address(address_, sigc::mem_fun(*this, &Watcher::connected),
++                                            cancellable_,
++                                            Gio::DBus::CONNECTION_FLAGS_AUTHENTICATION_CLIENT |
++                                                Gio::DBus::CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION);
++}
++
++void Watcher::connected(Glib::RefPtr<Gio::AsyncResult>& result) {
++  try {
++    conn_ = Gio::DBus::Connection::create_for_address_finish(result);
++  } catch (const Glib::Error& err) {
++    if (!connect_failed_) {
++      spdlog::warn("Tray: bus {} unreachable ({}); retrying every {}s", address_,
++                   err.what().c_str(), RECONNECT_SECONDS);
++      connect_failed_ = true;
++    }
++    retry_ = Glib::signal_timeout().connect_seconds(sigc::mem_fun(*this, &Watcher::retry),
++                                                    RECONNECT_SECONDS);
++    return;
++  }
++  spdlog::info("Tray: hosting items on {}", address_);
++  connect_failed_ = false;
++  // g_dbus_connection_new_for_address() already leaves this false; said
++  // explicitly because exiting on close would take the whole bar with it.
++  conn_->set_exit_on_close(false);
++  conn_->signal_closed().connect(sigc::mem_fun(*this, &Watcher::disconnected));
++  busAcquired(conn_, "");
++  bus_name_id_ = g_bus_own_name_on_connection(
++      conn_->gobj(), "org.kde.StatusNotifierWatcher",
++      static_cast<GBusNameOwnerFlags>(G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT |
++                                      G_BUS_NAME_OWNER_FLAGS_REPLACE),
++      nullptr, nullptr, nullptr, nullptr);
++  signal_connection.emit(conn_);
++}
++
++void Watcher::disconnected(bool /*remote_peer_vanished*/, const Glib::Error& /*error*/) {
++  spdlog::warn("Tray: lost bus {}; retrying every {}s", address_, RECONNECT_SECONDS);
++  // Hosts drop their items first, while the watches they mirror still exist.
++  signal_connection.emit(ConnectionRef());
++  if (bus_name_id_ > 0) {
++    g_bus_unown_name(bus_name_id_);
++    bus_name_id_ = 0;
++  }
++  g_dbus_interface_skeleton_unexport(G_DBUS_INTERFACE_SKELETON(watcher_));
++  g_slist_free_full(hosts_, gfWatchFree);
++  hosts_ = nullptr;
++  g_slist_free_full(items_, gfWatchFree);
++  items_ = nullptr;
++  updateRegisteredItems(watcher_);
++  sn_watcher_set_is_host_registered(watcher_, FALSE);
++  conn_.reset();
++  connect_failed_ = true;
++  retry_ = Glib::signal_timeout().connect_seconds(sigc::mem_fun(*this, &Watcher::retry),
++                                                  RECONNECT_SECONDS);
++}
++
++bool Watcher::retry() {
++  connect();
++  return false;
++}
+ 
+ Watcher::~Watcher() {
+   if (hosts_ != nullptr) {
+@@ -24,7 +96,13 @@ Watcher::~Watcher() {
+     g_slist_free_full(items_, gfWatchFree);
+     items_ = nullptr;
+   }
+-  Gio::DBus::unown_name(bus_name_id_);
++  retry_.disconnect();
++  if (cancellable_) {
++    cancellable_->cancel();
++  }
++  if (bus_name_id_ > 0) {
++    Gio::DBus::unown_name(bus_name_id_);
++  }
+   auto iface = G_DBUS_INTERFACE_SKELETON(watcher_);
+   g_dbus_interface_skeleton_unexport(iface);
+ }
+@@ -45,6 +123,11 @@ void Watcher::busAcquired(const Glib::RefPtr<Gio::DBus::Connection>& conn, Glib:
+     }
+     return;
+   }
++  // A reconnect re-exports the same skeleton; connect its handlers once.
++  if (signals_connected_) {
++    return;
++  }
++  signals_connected_ = true;
+   g_signal_connect_swapped(watcher_, "handle-register-item",
+                            G_CALLBACK(&Watcher::handleRegisterItem), this);
+   g_signal_connect_swapped(watcher_, "handle-register-host",
+@@ -147,8 +230,14 @@ Watcher::GfWatch* Watcher::gfWatchNew(GfWatchType type, const gchar* service, co
+   watch->service = g_strdup(service);
+   watch->bus_name = g_strdup(bus_name);
+   watch->object_path = g_strdup(object_path);
+-  watch->watch_id = g_bus_watch_name(G_BUS_TYPE_SESSION, bus_name, G_BUS_NAME_WATCHER_FLAGS_NONE,
+-                                     nullptr, &Watcher::nameVanished, watch, nullptr);
++  if (watcher->conn_) {
++    watch->watch_id = g_bus_watch_name_on_connection(watcher->conn_->gobj(), bus_name,
++                                                     G_BUS_NAME_WATCHER_FLAGS_NONE, nullptr,
++                                                     &Watcher::nameVanished, watch, nullptr);
++  } else {
++    watch->watch_id = g_bus_watch_name(G_BUS_TYPE_SESSION, bus_name, G_BUS_NAME_WATCHER_FLAGS_NONE,
++                                       nullptr, &Watcher::nameVanished, watch, nullptr);
++  }
+   return watch;
+ }
+ 
