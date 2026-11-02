@@ -123,3 +123,34 @@ index 34a3c05f..5286ed74 100644
  auto Tray::update() -> void {
    // Show tray only when items are available
    std::vector<Gtk::Widget*> children = box_.get_children();
+diff --git a/include/modules/sni/host.hpp b/include/modules/sni/host.hpp
+index 6c62ac31..4f632b0f 100644
+--- a/include/modules/sni/host.hpp
++++ b/include/modules/sni/host.hpp
+@@ -31,6 +31,7 @@ class Host {
+ 
+   std::tuple<std::string, std::string> getBusNameAndObjectPath(const std::string);
+   void addRegisteredItem(std::string service);
++  void dropItems();
+ 
+   std::vector<std::unique_ptr<Item>> items_;
+   const std::string bus_name_;
+diff --git a/src/modules/sni/host.cpp b/src/modules/sni/host.cpp
+index 54faa16c..a3639fb1 100644
+--- a/src/modules/sni/host.cpp
++++ b/src/modules/sni/host.cpp
+@@ -54,6 +54,14 @@ void Host::nameVanished(const Glib::RefPtr<Gio::DBus::Connection>& conn, const G
+   g_cancellable_cancel(cancellable_);
+   g_clear_object(&cancellable_);
+   g_clear_object(&watcher_);
++  dropItems();
++}
++
++// Remove every item through the tray, which holds raw pointers to them.
++void Host::dropItems() {
++  for (auto& item : items_) {
++    on_remove_(item);
++  }
+   items_.clear();
+ }
+ 
