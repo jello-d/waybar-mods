@@ -1,0 +1,84 @@
+diff --git a/include/modules/sni/item.hpp b/include/modules/sni/item.hpp
+index 8b58d8e5..3113e952 100644
+--- a/include/modules/sni/item.hpp
++++ b/include/modules/sni/item.hpp
+@@ -84,6 +84,7 @@ class Item : public sigc::trackable {
+   double getScaledIconSize();
+   static void onMenuDestroyed(Item* self, GObject* old_menu_pointer);
+   void makeMenu();
++  bool openBusMenu(GdkEventButton*);
+   bool handleClick(GdkEventButton* const& /*ev*/);
+   bool handleScroll(GdkEventScroll* const&);
+   bool handleMouseEnter(GdkEventCrossing* const&);
+@@ -99,6 +100,8 @@ class Item : public sigc::trackable {
+   const Bar& bar_;
+   // True when hosted on a tray's own connection rather than the session bus.
+   const bool on_bus_;
++  // On another bus: the menu bus_menu.hpp built for the last click.
++  std::unique_ptr<Gtk::Menu> bus_menu_;
+ 
+   Glib::RefPtr<Gio::DBus::Proxy> proxy_;
+   Glib::RefPtr<Gio::Cancellable> cancellable_;
+diff --git a/src/modules/sni/item.cpp b/src/modules/sni/item.cpp
+index ffb92975..bc699b9c 100644
+--- a/src/modules/sni/item.cpp
++++ b/src/modules/sni/item.cpp
+@@ -9,6 +9,7 @@
+ #include <fstream>
+ #include <map>
+ 
++#include "bus_menu.hpp"
+ #include "gdk/gdk.h"
+ #include "modules/sni/icon_manager.hpp"
+ #include "util/format.hpp"
+@@ -86,6 +87,9 @@ Item::~Item() {
+     this->gtk_menu->popdown();
+     this->gtk_menu->detach();
+   }
++  if (bus_menu_) {
++    bus_menu_->popdown();
++  }
+ }
+ 
+ bool Item::handleMouseEnter(GdkEventCrossing* const& e) {
+@@ -500,7 +504,7 @@ void Item::onMenuDestroyed(Item* self, GObject* old_menu_pointer) {
+ 
+ void Item::makeMenu() {
+   // libdbusmenu reaches only the session bus (it takes no connection), so on
+-  // another bus there is no menu yet and a click falls back to ContextMenu.
++  // another bus the menu comes from openBusMenu instead.
+   if (gtk_menu == nullptr && !menu.empty() && !on_bus_) {
+     dbus_menu = dbusmenu_gtkmenu_new(bus_name.data(), menu.data());
+     if (dbus_menu != nullptr) {
+@@ -515,11 +519,31 @@ void Item::makeMenu() {
+   event_box.unset_state_flags(Gtk::StateFlags::STATE_FLAG_PRELIGHT);
+ }
+ 
++// Build the menu from the item's layout and pop it up, inside the press (see
++// bus_menu::fetch for why both). False when there is nothing to show.
++bool Item::openBusMenu(GdkEventButton* ev) {
++  auto* conn = proxy_->get_connection()->gobj();
++  GVariant* children = bus_menu::fetch(conn, bus_name, menu);
++  if (children == nullptr) {
++    return false;
++  }
++  bus_menu_ = std::make_unique<Gtk::Menu>();
++  bus_menu::fill(*bus_menu_, children, conn, bus_name, menu);
++  g_variant_unref(children);
++  bus_menu_->attach_to_widget(event_box);
++  bus_menu_->popup_at_pointer(reinterpret_cast<GdkEvent*>(ev));
++  event_box.unset_state_flags(Gtk::StateFlags::STATE_FLAG_PRELIGHT);
++  return true;
++}
++
+ bool Item::handleClick(GdkEventButton* const& ev) {
+   auto parameters = Glib::VariantContainerBase::create_tuple(
+       {Glib::Variant<int>::create(ev->x_root + bar_.x_global),
+        Glib::Variant<int>::create(ev->y_root + bar_.y_global)});
+   if ((ev->button == 1 && item_is_menu) || ev->button == 3) {
++    if (on_bus_ && !menu.empty() && openBusMenu(ev)) {
++      return true;
++    }
+     makeMenu();
+     if (gtk_menu != nullptr) {
+ #if GTK_CHECK_VERSION(3, 22, 0)

@@ -35,7 +35,10 @@ Behaviour patches (in `patches/`):
 - `tray-bus`: a tray hosting the items of another D-Bus address (`"bus"`), so
   a second tray can show a separate session's icons (another user's apps,
   through a filtering proxy) apart from the session tray. Optional `"label"`;
-  the tray carries the `bus` class for styling. No menus on it yet.
+  the tray carries the `bus` class for styling.
+- `tray-bus-menu`: menus for that tray, from a small dbusmenu client on the
+  tray's own connection (`overlays/bus_menu.hpp`), since libdbusmenu only
+  reaches the session bus.
 
 ## Use
 

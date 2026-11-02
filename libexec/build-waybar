@@ -87,6 +87,10 @@ cp "$OV/np_frame.hpp"      "$SRC/include/np_frame.hpp"
 # stream), shared by the wayfire/* modules so a second one does not carry a
 # second copy of the wire format.
 cp "$OV/wf_ipc.hpp"        "$SRC/include/wf_ipc.hpp"
+# bus_menu.hpp is a minimal dbusmenu client on an explicit D-Bus connection,
+# for the menus of a tray on another bus (libdbusmenu reaches only the session
+# bus). Used by tray-bus-menu.patch.
+cp "$OV/bus_menu.hpp"      "$SRC/include/bus_menu.hpp"
 
 # --- restore tracked files to pristine, then apply our patches --------------
 # A reused checkout still carries a prior run's applied patches as local edits;
@@ -109,6 +113,8 @@ git -C "$SRC" apply "$PAT/sni-refetch.patch"
 # a tray on another D-Bus address (`"bus"`): an enclave's items, in a tray of
 # their own beside the session one
 git -C "$SRC" apply "$PAT/tray-bus.patch"
+# menus for that tray, built by bus_menu.hpp on the tray's own connection
+git -C "$SRC" apply "$PAT/tray-bus-menu.patch"
 
 # --- build + install --------------------------------------------------------
 # cava is retired here (our sysmon/graph module replaced it). Its meson feature
