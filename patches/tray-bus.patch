@@ -295,10 +295,10 @@ index 13b5a0c3..ffb92975 100644
      if (dbus_menu != nullptr) {
        g_object_ref_sink(G_OBJECT(dbus_menu));
 diff --git a/src/modules/sni/tray.cpp b/src/modules/sni/tray.cpp
-index 5286ed74..f2d5e7ba 100644
+index 5286ed74..06304a85 100644
 --- a/src/modules/sni/tray.cpp
 +++ b/src/modules/sni/tray.cpp
-@@ -13,15 +13,30 @@ namespace waybar::modules::SNI {
+@@ -13,15 +13,33 @@ namespace waybar::modules::SNI {
  Tray::Tray(const std::string& id, const Bar& bar, const Json::Value& config)
      : AModule(config, "tray", id),
        box_(bar.orientation, 0),
@@ -321,6 +321,9 @@ index 5286ed74..f2d5e7ba 100644
 +  }
    if (!id.empty()) {
      box_.get_style_context()->add_class(id);
++    // The label carries the id too, so one selector colours a whole tray
++    // (`#tray.titan`, `#tray-label.titan`) without colouring every bus tray.
++    label_.get_style_context()->add_class(id);
    }
    box_.get_style_context()->add_class(MODULE_CLASS);
 +  // A tray on another bus (an enclave's) is styled apart from the session
@@ -332,7 +335,7 @@ index 5286ed74..f2d5e7ba 100644
    if (config_["spacing"].isUInt()) {
      box_.set_spacing(config_["spacing"].asUInt());
    }
-@@ -88,7 +103,10 @@ void Tray::sortItems() {
+@@ -88,7 +106,10 @@ void Tray::sortItems() {
  auto Tray::update() -> void {
    // Show tray only when items are available
    std::vector<Gtk::Widget*> children = box_.get_children();
