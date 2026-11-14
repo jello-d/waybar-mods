@@ -161,11 +161,14 @@ Gauge::Gauge(const std::string& id, const waybar::Bar& bar,
 
   // Scale the gauge with the BAR height (48 = design), so the taller wall bar
   // enlarges the glyph + readout with no per-bar config. Base bar is a no-op.
-  const double ui = bar_.config["height"].isInt()
-                        ? bar_.config["height"].asInt() / 48.0
-                        : 1.0;
-  width_ = static_cast<int>(width_ * ui + 0.5);
-  font_px_ *= ui;
+  // Every pixel constant in the drawing (margins, floors, gaps) is scaled by
+  // ui_ too: a constant left at its 48px value grows RELATIVE to a shorter bar
+  // and crowds the glyph out (the % ate the battery, the F value the dial).
+  ui_ = bar_.config["height"].isInt() ? bar_.config["height"].asInt() / 48.0
+                                      : 1.0;
+  width_ = static_cast<int>(width_ * ui_ + 0.5);
+  font_px_ *= ui_;
+  vmargin_ = static_cast<int>(vmargin_ * ui_ + 0.5);
 
   event_box_.set_name("hwgauge-" + (id.empty() ? k : id));
 
@@ -1171,7 +1174,7 @@ void Gauge::draw_battery(const Cairo::RefPtr<Cairo::Context>& cr, double x,
   cr->restore();
 
   // hollow interior cavity (the empty cell), inset to leave a metal frame
-  const double ft = std::max(1.8, bh * 0.15);    // frame thickness
+  const double ft = std::max(1.8 * ui_, bh * 0.15);    // frame thickness
   const double ecx = eC * 0.6;                   // cavity end-cap bulge
   const double ix = bx + ft, iy = by + ft;
   const double iw = bw - 2.0 * ft, ih = bh - 2.0 * ft;
@@ -1295,7 +1298,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   if (gpu_) {
     const double hp = R * 1.06;
     const double x0 = cx - hp, y0 = cy - hp, s = 2.0 * hp;
-    const double edge = std::max(1.0, R * 0.05);
+    const double edge = std::max(1.0 * ui_, R * 0.05);
 
     cr->rectangle(x0, y0 + R * 0.05, s, s);              // soft drop shadow
     cr->set_source_rgba(0, 0, 0, 0.22);
@@ -1381,7 +1384,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   // CPU's matte parchment. Kept low-alpha and inside the tick ring so it never
   // competes with the band, needle, or readout.
   if (gpu_) {
-    cr->set_line_width(std::max(0.5, R * 0.012));
+    cr->set_line_width(std::max(0.5 * ui_, R * 0.012));
     cr->set_source_rgba(fc0r + 0.12, fc0g + 0.12, fc0b + 0.13, 0.30);
     for (int i = 1; i <= 4; i++) {
       cr->arc(cx, cy, rf * (0.16 + i * 0.13), 0, 2 * kPi);
@@ -1395,7 +1398,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   {
     const double ix = cx, iy = cy - rf * 0.46, s = rf * 0.26;
     cr->set_source_rgba(ar, ag, ab, 0.62);
-    cr->set_line_width(std::max(0.8, R * 0.03));
+    cr->set_line_width(std::max(0.8 * ui_, R * 0.03));
     cr->set_line_join(Cairo::LINE_JOIN_ROUND);
     if (gpu_) {
       cr->arc(ix, iy, s, 0, 2 * kPi);                 // fan shroud
@@ -1435,7 +1438,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
       clampf((temp_hot_ - temp_min_) / (temp_max_ - temp_min_));
   const double band_r = rf * 0.80;
   cr->set_line_cap(Cairo::LINE_CAP_BUTT);
-  cr->set_line_width(std::max(3.0, R * 0.20));
+  cr->set_line_width(std::max(3.0 * ui_, R * 0.20));
   cr->set_source_rgba(0.29, 0.68, 0.33, 1.0);          // green (cool)
   cr->arc(cx, cy, band_r, ang(0.0), ang(f_warm));
   cr->stroke();
@@ -1449,7 +1452,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   // a few BOLD major ticks just inside the band (cream, so they read on the
   // dark face; not a fine ring)
   cr->set_source_rgba(0.88, 0.82, 0.70, 0.85);
-  cr->set_line_width(std::max(1.4, R * 0.05));
+  cr->set_line_width(std::max(1.4 * ui_, R * 0.05));
   for (int i = 0; i <= 4; i++) {
     const double a = ang(i / 4.0);
     const double r0 = rf * 0.55, r1 = rf * 0.68;
@@ -1462,8 +1465,10 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   // far side, wrapped in a white keyline so it pops over any zone colour.
   const double a = ang(level_), nx = std::cos(a), ny = std::sin(a);
   const double px = -ny, py = nx;      // unit perpendicular
-  const double tip = rf * 0.94, tail = rf * 0.26, hw = std::max(2.6, R * 0.15);
-  const double cw = rf * 0.30, cwr = std::max(1.8, R * 0.13);   // counterweight
+  const double tip = rf * 0.94, tail = rf * 0.26;
+  const double hw = std::max(2.6 * ui_, R * 0.15);
+  const double cw = rf * 0.30;                   // counterweight
+  const double cwr = std::max(1.8 * ui_, R * 0.13);
   auto needle_shape = [&] {
     cr->move_to(cx + nx * tip, cy + ny * tip);
     cr->line_to(cx + px * hw - nx * tail, cy + py * hw - ny * tail);
@@ -1480,7 +1485,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   cr->restore();
   needle_shape();                      // dark keyline for a hard edge
   cr->set_line_join(Cairo::LINE_JOIN_ROUND);
-  cr->set_line_width(std::max(1.8, R * 0.08));
+  cr->set_line_width(std::max(1.8 * ui_, R * 0.08));
   cr->set_source_rgba(0.05, 0.05, 0.07, 0.92);
   cr->stroke();
   needle_shape();                      // bright WHITE fill
@@ -1504,7 +1509,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   std::snprintf(buf, sizeof buf, "%.0f", temp_c_ * 9.0 / 5.0 + 32.0);
   cr->select_font_face("sans-serif", Cairo::FONT_SLANT_NORMAL,
                        Cairo::FONT_WEIGHT_BOLD);
-  double fs = std::max(9.0, R * 0.64);
+  double fs = std::max(9.0 * ui_, R * 0.64);
   cr->set_font_size(fs);
   Cairo::TextExtents te;
   cr->get_text_extents(buf, te);
@@ -1521,7 +1526,7 @@ void Gauge::draw_dial(const Cairo::RefPtr<Cairo::Context>& cr, double cx,
   cr->move_to(bx, by);                 // heavy black outline
   cr->text_path(buf);
   cr->set_line_join(Cairo::LINE_JOIN_ROUND);
-  cr->set_line_width(std::max(2.2, R * 0.12));
+  cr->set_line_width(std::max(2.2 * ui_, R * 0.12));
   cr->set_source_rgba(0, 0, 0, 0.95);
   cr->stroke();
   cr->move_to(bx, by);                 // zone-coloured fill
@@ -1541,7 +1546,7 @@ void Gauge::draw_text(const Cairo::RefPtr<Cairo::Context>& cr,
   cr->move_to(tx, baseline);
   cr->text_path(s);
   cr->set_line_join(Cairo::LINE_JOIN_ROUND);
-  cr->set_line_width(2.5);
+  cr->set_line_width(2.5 * ui_);
   cr->set_source_rgba(0.0, 0.0, 0.0, 0.85);
   cr->stroke_preserve();
   cr->set_source_rgba(fr, fg, fb, 1.0);
@@ -1594,7 +1599,7 @@ bool Gauge::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
 
     // A bigger % readout, fit to the widget width so a wide "100%" auto-shrinks
     // while the common two-digit values render at the full size.
-    const double npx = font_px_ + 9.0;
+    const double npx = font_px_ + 9.0 * ui_;
     cr->select_font_face("sans-serif", Cairo::FONT_SLANT_NORMAL,
                          Cairo::FONT_WEIGHT_BOLD);
     cr->set_font_size(npx);
@@ -1610,7 +1615,8 @@ bool Gauge::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
     // Layout: the % baseline sits at h - bot_edge and the icon height is fixed;
     // the icon rides high with only a small top buffer, so the icon-to-text gap
     // opens up by eating into the top rather than pushing the text down.
-    const double top_edge = 1.0, bot_edge = 3.0, gap = 3.5;
+    const double top_edge = 1.0 * ui_, bot_edge = 3.0 * ui_;
+    const double gap = 3.5 * ui_;
     const double baseline = h - bot_edge;
     const double icon_h = baseline - cap - gap - top_edge;
     draw_battery(cr, 2.0, top_edge, w - 4.0, icon_h);

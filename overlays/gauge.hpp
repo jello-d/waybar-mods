@@ -66,6 +66,7 @@ class Gauge final : public waybar::AModule {
   int width_ = 0;               // 0 => per-kind default
   double font_px_ = 11.0;
   int vmargin_ = 4;
+  double ui_ = 1.0;             // bar height / 48, the design height
   int hmargin_ = 1;   // per-side gap to neighbours; small so the gauges tuck up
   int interval_ms_ = 5000;      // sysfs poll (brightness/battery)
   double scroll_step_ = 5.0;
